@@ -102,8 +102,9 @@ class MemoryManager:
         topic: Optional[str] = None,
         persist: bool = True,
         enqueue_proposals: bool = True,
+        enqueue_edge_suggestions: bool = True,
     ) -> ReflectionReport:
-        """Report-only reflection; optionally enqueue approval proposals.
+        """Report-only reflection; optionally enqueue concept/edge proposals.
 
         Graph is never written here. Proposals are pending suggestions only.
         """
@@ -115,18 +116,33 @@ class MemoryManager:
         # Persist structured report in SQLite for history / provenance
         self.sqlite.save_reflection_report(report)
 
+        concept_ids: List[str] = []
+        edge_ids: List[str] = []
+
         if enqueue_proposals and report.concept_candidates:
             created = self.approval.enqueue_from_report(report)
-            report.metadata["proposals_enqueued"] = len(created)
-            report.metadata["proposal_ids"] = [p.proposal_id for p in created]
-            if created:
-                report.notes.append(
-                    f"Enqueued {len(created)} pending proposal(s) for human review "
-                    f"(`grmc propose`). Graph still unchanged."
-                )
-                report.suggested_actions.insert(
-                    0,
-                    "Review pending proposals with `grmc propose`, then "
-                    "`grmc approve <id>` or `grmc reject <id>`.",
-                )
+            concept_ids = [p.proposal_id for p in created]
+
+        if enqueue_edge_suggestions and report.edge_suggestions:
+            edge_created = self.approval.enqueue_edge_suggestions(report)
+            edge_ids = [p.proposal_id for p in edge_created]
+
+        report.metadata["proposals_enqueued"] = len(concept_ids)
+        report.metadata["edge_proposals_enqueued"] = len(edge_ids)
+        report.metadata["proposal_ids"] = concept_ids
+        report.metadata["edge_proposal_ids"] = edge_ids
+
+        total = len(concept_ids) + len(edge_ids)
+        if total:
+            report.notes.append(
+                f"Enqueued {len(concept_ids)} concept + {len(edge_ids)} edge "
+                f"pending proposal(s) for human review (`grmc propose`). "
+                "Graph still unchanged."
+            )
+            report.suggested_actions.insert(
+                0,
+                "Review pending proposals with `grmc propose` "
+                "(filter: `--kind edge` or `--kind concept_candidate`), then "
+                "`grmc approve <id>` or `grmc reject <id>`.",
+            )
         return report

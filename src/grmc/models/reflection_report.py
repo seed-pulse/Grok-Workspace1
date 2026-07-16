@@ -42,6 +42,22 @@ class ContradictionFlag(BaseModel):
         description="Low by design — heuristics over-flag less often than under-flag.",
     )
     requires_human_review: bool = True
+    method: str = "negation_overlap"  # negation_overlap | embedding_polarity | corpus_poles
+    similarity: Optional[float] = None
+
+
+class EdgeSuggestion(BaseModel):
+    """Soft node↔node edge idea from reflection — never auto-written."""
+
+    source_label: str = ""
+    target_label: str = ""
+    source_node_id: Optional[str] = None
+    target_node_id: Optional[str] = None
+    edge_type: str = "related_to"  # supports | contradicts | related_to (basic set)
+    confidence: float = Field(default=0.2, ge=0.0, le=1.0)
+    reason: str = ""
+    supporting_episode_ids: List[str] = Field(default_factory=list)
+    requires_human_review: bool = True
 
 
 class ReflectionReport(BaseModel):
@@ -58,6 +74,7 @@ class ReflectionReport(BaseModel):
     concept_candidates: List[ConceptCandidate] = Field(default_factory=list)
     concept_frequencies: Dict[str, int] = Field(default_factory=dict)
     potential_contradictions: List[ContradictionFlag] = Field(default_factory=list)
+    edge_suggestions: List[EdgeSuggestion] = Field(default_factory=list)
 
     potential_issues: List[str] = Field(default_factory=list)
     suggested_actions: List[str] = Field(default_factory=list)

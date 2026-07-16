@@ -16,6 +16,7 @@ from ..models.episode import Episode
 from ..storage.sqlite_store import SQLiteStore
 from .bridge_cmd import bridge_app
 from .edges_cmd import edges_app
+from .ops_cmd import ops_app
 
 app = typer.Typer(
     help="GRMC - Grok Reflective Memory Core (think via reflect, write via approve)",
@@ -23,6 +24,7 @@ app = typer.Typer(
 )
 app.add_typer(bridge_app, name="bridge")
 app.add_typer(edges_app, name="edges")
+app.add_typer(ops_app, name="ops")
 console = Console()
 
 DEFAULT_DATA_DIR = "./grmc_data"
@@ -236,6 +238,11 @@ def reflect(
         "--no-propose",
         help="Do not enqueue concept candidates as pending proposals",
     ),
+    no_edge_propose: bool = typer.Option(
+        False,
+        "--no-edge-propose",
+        help="Do not enqueue soft edge suggestions as pending edge proposals",
+    ),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
     embedder: str = typer.Option("auto", "--embedder"),
 ):
@@ -253,6 +260,7 @@ def reflect(
             topic=topic,
             persist=not no_persist,
             enqueue_proposals=not no_propose,
+            enqueue_edge_suggestions=not no_edge_propose,
         )
 
     title = "Reflection Report (non-mutating)"
@@ -261,12 +269,14 @@ def reflect(
 
     embedder_name = getattr(manager.embedder, "name", "unknown")
     enqueued = report.metadata.get("proposals_enqueued", 0)
+    edge_enq = report.metadata.get("edge_proposals_enqueued", 0)
     console.print(
         Panel.fit(
             f"[bold]{report.report_id}[/bold]\n"
             f"mode={report.mode}  episodes={report.episodes_analyzed}  "
             f"confidence={report.confidence_level}  mutates_memory={report.mutates_memory}\n"
-            f"embedder={embedder_name}  proposals_enqueued={enqueued}",
+            f"embedder={embedder_name}  concept_proposals={enqueued}  "
+            f"edge_proposals={edge_enq}",
             title=title,
             border_style="cyan",
         )
@@ -290,8 +300,11 @@ def reflect(
             f"({len(report.potential_contradictions)}) — human review[/bold yellow]"
         )
         for i, flag in enumerate(report.potential_contradictions[:10], 1):
+            method = getattr(flag, "method", "?")
+            sim = getattr(flag, "similarity", None)
+            sim_s = f" sim={sim:.3f}" if sim is not None else ""
             console.print(
-                f"  {i}. conf={flag.confidence:.2f}  "
+                f"  {i}. [{method}] conf={flag.confidence:.2f}{sim_s}  "
                 f"{flag.episode_id_a} ↔ {flag.episode_id_b}"
             )
             console.print(f"     reason: {flag.reason}")
@@ -299,6 +312,17 @@ def reflect(
         console.print(
             "\n[dim]No contradiction heuristic fired (not proof of consistency).[/dim]"
         )
+
+    if report.edge_suggestions:
+        console.print(
+            f"\n[bold]Soft edge suggestions ({len(report.edge_suggestions)}) "
+            "— not written[/bold]"
+        )
+        for s in report.edge_suggestions[:10]:
+            console.print(
+                f"  • {s.source_label} -[{s.edge_type}]-> {s.target_label} "
+                f"conf={s.confidence:.2f}"
+            )
 
     if report.suggested_actions:
         console.print("\n[bold]Suggested actions (manual)[/bold]")
@@ -318,10 +342,10 @@ def reflect(
     report_path = report.metadata.get("report_path")
     if report_path:
         console.print(f"\n[green]✓[/green] Audit report: {report_path}")
-    if enqueued:
+    if enqueued or edge_enq:
         console.print(
-            f"[green]✓[/green] Enqueued {enqueued} proposal(s). "
-            "Next: [bold]grmc propose[/bold]"
+            f"[green]✓[/green] Enqueued concept={enqueued} edge={edge_enq}. "
+            "Next: [bold]grmc propose[/bold] / [bold]grmc propose --kind edge[/bold]"
         )
 
     if output:
@@ -337,12 +361,18 @@ def propose(
         "-s",
         help="Filter: pending | approved | rejected | all",
     ),
+    kind: Optional[str] = typer.Option(
+        None,
+        "--kind",
+        "-k",
+        help="Filter: concept_candidate | manual | edge",
+    ),
     limit: int = typer.Option(50, "--limit", "-n"),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
     label: Optional[str] = typer.Option(
         None,
         "--add",
-        help="Manually add a pending proposal with this label (no graph write)",
+        help="Manually add a pending concept proposal with this label (no graph write)",
     ),
 ):
     """List approval-queue proposals, or manually add one with --add."""
@@ -358,12 +388,16 @@ def propose(
             )
 
     filter_status = None if status == "all" else status
-    items = manager.approval.list(status=filter_status, limit=limit)
+    items = manager.approval.list(status=filter_status, limit=limit, kind=kind)
     if not items:
-        console.print(f"[dim]No proposals with status={status!r}.[/dim]")
+        console.print(
+            f"[dim]No proposals with status={status!r}"
+            + (f" kind={kind!r}" if kind else "")
+            + ".[/dim]"
+        )
         return
 
-    table = Table(title=f"Proposals ({status})")
+    table = Table(title=f"Proposals ({status}" + (f", {kind}" if kind else "") + ")")
     table.add_column("ID", style="cyan")
     table.add_column("Kind")
     table.add_column("Status")
@@ -522,9 +556,20 @@ def node_cmd(
         "--with-provenance/--no-provenance",
         help="Show episode↔node provenance links",
     ),
+    provenance: bool = typer.Option(
+        False,
+        "--provenance",
+        help="Alias to force-show provenance (same as --with-provenance)",
+    ),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
 ):
-    """Show one GraphNode with optional edges and provenance ('why this node?')."""
+    """Show one GraphNode with optional edges and provenance ('why this node?').
+
+    Examples:
+      grmc node node_abc --provenance
+      grmc node node_abc --with-edges --with-provenance
+    """
+    show_provenance = with_provenance or provenance
     db = _sqlite(data_dir)
     node = db.get_graph_node(node_id)
     if node is None:
@@ -543,7 +588,7 @@ def node_cmd(
         )
     )
 
-    if with_provenance:
+    if show_provenance:
         links = db.list_links_for_node(node_id)
         if not links:
             console.print("[dim]No provenance links recorded for this node.[/dim]")

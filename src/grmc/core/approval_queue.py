@@ -18,12 +18,18 @@ from ..models.graph_edge import (
 )
 from ..models.graph_node import GraphNode, NodeType
 from ..models.proposal import Proposal
-from ..models.reflection_report import ConceptCandidate, ReflectionReport
+from ..models.reflection_report import (
+    ConceptCandidate,
+    EdgeSuggestion,
+    ReflectionReport,
+)
 from ..storage.sqlite_store import SQLiteStore
 
 # Hard cap on confidence for first-time human approvals (truth-seeking).
 DEFAULT_APPROVE_CONFIDENCE_CAP = 0.55
 DEFAULT_EDGE_CONFIDENCE_CAP = 0.45
+# Soft edge suggestions from reflection stay even lower until human raises.
+DEFAULT_SOFT_EDGE_CONFIDENCE_CAP = 0.30
 
 
 class ApprovalQueue:
@@ -130,6 +136,40 @@ class ApprovalQueue:
     # ------------------------------------------------------------------
     # Edge proposals (always human-gated; never auto-strong)
     # ------------------------------------------------------------------
+
+    def enqueue_edge_suggestions(
+        self,
+        report: ReflectionReport,
+        *,
+        max_suggestions: int = 15,
+    ) -> List[Proposal]:
+        """Enqueue soft edge suggestions as pending edge proposals.
+
+        Only suggestions with both node ids set are accepted.
+        Never writes edges. Caps confidence conservatively.
+        """
+        created: List[Proposal] = []
+        for sugg in report.edge_suggestions[:max_suggestions]:
+            if not sugg.source_node_id or not sugg.target_node_id:
+                continue
+            if sugg.edge_type not in ("supports", "contradicts", "related_to"):
+                # v0.5 basic set only from reflection soft path
+                continue
+            try:
+                prop = self.enqueue_edge(
+                    sugg.source_node_id,
+                    sugg.target_node_id,
+                    sugg.edge_type,
+                    confidence=min(sugg.confidence, DEFAULT_SOFT_EDGE_CONFIDENCE_CAP),
+                    supporting_episode_ids=sugg.supporting_episode_ids,
+                    report_id=report.report_id,
+                    note=sugg.reason,
+                    source="reflection-soft",
+                )
+                created.append(prop)
+            except (KeyError, ValueError):
+                continue
+        return created
 
     def enqueue_edge(
         self,

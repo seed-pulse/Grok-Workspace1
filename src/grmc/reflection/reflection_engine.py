@@ -23,8 +23,10 @@ from uuid import uuid4
 from ..models.reflection_report import (
     ConceptCandidate,
     ContradictionFlag,
+    EdgeSuggestion,
     ReflectionReport,
 )
+from ..core.embedder import cosine_similarity
 
 
 # Shared content tokens shorter than this are ignored when pairing episodes.
@@ -154,7 +156,7 @@ class ReflectionEngine:
             episode_ids=[e["episode_id"] for e in episodes],
             confidence_level="conservative",
             mutates_memory=False,
-            engine_version="0.1.0",
+            engine_version="0.5.0",
         )
 
         self._attach_limitations(report, mode=mode, requested_limit=recent_limit)
@@ -180,6 +182,12 @@ class ReflectionEngine:
 
         # --- Contradiction / tension heuristics (low confidence) ---
         report.potential_contradictions = self._scan_contradictions(episodes)
+        # Embedding pairwise tensions (report-only; still low confidence)
+        emb_flags = self._scan_embedding_tensions(episodes)
+        report.potential_contradictions.extend(emb_flags)
+
+        # Soft edge ideas when graph nodes already exist (still not written)
+        report.edge_suggestions = self._suggest_edges(report, episodes)
 
         # --- Suggested actions (never auto-applied) ---
         report.suggested_actions.extend(self._suggest_actions(report))
@@ -203,9 +211,14 @@ class ReflectionEngine:
 
         report.notes.append(
             "Report-only mode: knowledge graph was not modified. "
-            "Candidates may be enqueued as pending proposals; "
-            "only `grmc approve <id>` writes GraphNodes."
+            "Concept/edge candidates may be enqueued as pending proposals; "
+            "only `grmc approve <id>` writes nodes or edges."
         )
+        if report.edge_suggestions:
+            report.notes.append(
+                f"{len(report.edge_suggestions)} soft edge suggestion(s) — "
+                "review via `grmc propose` if enqueued; never auto-applied."
+            )
         report.notes.append(
             f"Analyzed {len(episodes)} episode(s) in mode={mode!r}"
             + (f" topic={topic!r}" if topic else "")
@@ -365,6 +378,168 @@ class ReflectionEngine:
 
         return flags
 
+    def _scan_embedding_tensions(
+        self, episodes: Sequence[Dict[str, Any]]
+    ) -> List[ContradictionFlag]:
+        """High embedding similarity + differing polarity → soft tension flag.
+
+        Report-only. Confidence stays low. Requires MemoryManager.embedder.
+        """
+        embedder = getattr(self.memory_manager, "embedder", None)
+        if embedder is None:
+            return []
+
+        subset = list(episodes)[:_MAX_PAIRWISE_EPISODES]
+        texts = [(e.get("summary") or e.get("content_summary") or "") for e in subset]
+        if sum(1 for t in texts if t.strip()) < 2:
+            return []
+
+        try:
+            vectors = [embedder.encode(t) for t in texts]
+        except Exception:
+            return []
+
+        flags: List[ContradictionFlag] = []
+        # Threshold: high similarity. Hashing embedder is noisier → slightly lower.
+        name = getattr(embedder, "name", "")
+        thr = 0.72 if "hashing" in str(name) else 0.82
+
+        for i in range(len(subset)):
+            for j in range(i + 1, len(subset)):
+                if not texts[i] or not texts[j]:
+                    continue
+                sim = cosine_similarity(vectors[i], vectors[j])
+                if sim < thr:
+                    continue
+                neg_a = _has_negation(texts[i])
+                neg_b = _has_negation(texts[j])
+                if neg_a == neg_b:
+                    continue
+                flags.append(
+                    ContradictionFlag(
+                        episode_id_a=subset[i].get("episode_id", f"i{i}"),
+                        episode_id_b=subset[j].get("episode_id", f"j{j}"),
+                        summary_a=texts[i][:200],
+                        summary_b=texts[j][:200],
+                        reason=(
+                            f"High embedding similarity ({sim:.3f}) with differing "
+                            "negation polarity. Soft tension only — not proof of conflict."
+                        ),
+                        confidence=min(0.3, 0.15 + 0.1 * sim),
+                        requires_human_review=True,
+                        method="embedding_polarity",
+                        similarity=sim,
+                    )
+                )
+        return flags
+
+    def _suggest_edges(
+        self,
+        report: ReflectionReport,
+        episodes: Sequence[Dict[str, Any]],
+    ) -> List[EdgeSuggestion]:
+        """Suggest low-confidence edges only when both endpoints already exist.
+
+        Never creates nodes. Basic types: contradicts | related_to | supports.
+        """
+        sqlite = getattr(self.memory_manager, "sqlite", None)
+        if sqlite is None:
+            return []
+
+        suggestions: List[EdgeSuggestion] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        def add_sugg(
+            src_node,
+            tgt_node,
+            edge_type: str,
+            conf: float,
+            reason: str,
+            ep_ids: List[str],
+        ) -> None:
+            key = (src_node.node_id, tgt_node.node_id, edge_type)
+            if key in seen or src_node.node_id == tgt_node.node_id:
+                return
+            # Skip if edge already exists or pending
+            if sqlite.find_edge(src_node.node_id, tgt_node.node_id, edge_type):
+                return
+            if sqlite.find_pending_edge_proposal(
+                src_node.node_id, tgt_node.node_id, edge_type
+            ):
+                return
+            seen.add(key)
+            suggestions.append(
+                EdgeSuggestion(
+                    source_label=src_node.label,
+                    target_label=tgt_node.label,
+                    source_node_id=src_node.node_id,
+                    target_node_id=tgt_node.node_id,
+                    edge_type=edge_type,
+                    confidence=min(0.3, conf),
+                    reason=reason,
+                    supporting_episode_ids=ep_ids[:8],
+                    requires_human_review=True,
+                )
+            )
+
+        # Map episode_id → nodes grounded by that episode
+        nodes = sqlite.list_graph_nodes(limit=200)
+        ep_to_nodes: Dict[str, List[Any]] = {}
+        for node in nodes:
+            for eid in node.supporting_episodes or []:
+                ep_to_nodes.setdefault(eid, []).append(node)
+            for link in sqlite.list_links_for_node(node.node_id):
+                ep_to_nodes.setdefault(link.episode_id, []).append(node)
+
+        for flag in report.potential_contradictions:
+            ea, eb = flag.episode_id_a, flag.episode_id_b
+            if ea.startswith("(") or eb.startswith("("):
+                continue
+            for na in ep_to_nodes.get(ea, []):
+                for nb in ep_to_nodes.get(eb, []):
+                    if na.node_id == nb.node_id:
+                        continue
+                    add_sugg(
+                        na,
+                        nb,
+                        "contradicts",
+                        conf=min(0.28, flag.confidence + 0.05),
+                        reason=(
+                            f"Episodes {ea}↔{eb} flagged ({flag.method}); "
+                            f"nodes '{na.label}' and '{nb.label}' may be in tension."
+                        ),
+                        ep_ids=[ea, eb],
+                    )
+
+        # Co-mentioned concepts that both exist as nodes → soft related_to
+        labels_present = {
+            c.label.lower(): c for c in report.concept_candidates if c.supporting_episode_ids
+        }
+        node_by_label = {n.label.lower(): n for n in nodes}
+        shared_labels = [
+            lab for lab in labels_present if lab in node_by_label
+        ]
+        for i in range(len(shared_labels)):
+            for j in range(i + 1, len(shared_labels)):
+                la, lb = shared_labels[i], shared_labels[j]
+                ca, cb = labels_present[la], labels_present[lb]
+                common = set(ca.supporting_episode_ids) & set(cb.supporting_episode_ids)
+                if not common:
+                    continue
+                add_sugg(
+                    node_by_label[la],
+                    node_by_label[lb],
+                    "related_to",
+                    conf=0.22,
+                    reason=(
+                        f"Concepts co-occur in episode(s) {sorted(common)[:3]}; "
+                        "soft related_to only."
+                    ),
+                    ep_ids=sorted(common)[:6],
+                )
+
+        return suggestions[:20]
+
     def _pair_contradiction(
         self,
         episode_id_a: str,
@@ -397,6 +572,7 @@ class ReflectionEngine:
             ),
             confidence=0.25,
             requires_human_review=True,
+            method="negation_overlap",
         )
 
     # ------------------------------------------------------------------
@@ -411,11 +587,11 @@ class ReflectionEngine:
                 "Recent episodes come from SQLite (timestamp index). "
                 "ChromaDB is used only for semantic/topic retrieval.",
                 "Concept extraction is heuristic (regex tokenizer), not LLM-based.",
-                "Contradiction detection is weak surface heuristics at low confidence.",
+                "Contradiction detection mixes surface heuristics + optional "
+                "embedding polarity checks; both stay low confidence.",
                 "No knowledge graph is written by this engine (mutates_memory=False).",
                 "Graph writes require human `grmc approve` on pending proposals.",
-                "Topic mode uses vector retrieve; pairwise contradiction does not "
-                "yet use embeddings.",
+                "Edge suggestions only appear when both endpoint nodes already exist.",
             ]
         )
         if mode == "recent":
@@ -432,17 +608,19 @@ class ReflectionEngine:
         if report.potential_contradictions:
             actions.append(
                 "Inspect each potential_contradiction; either resolve in a new episode "
-                "note, or mark as open question (future: open_questions store)."
+                "note, or leave as open tension (do not auto-raise node confidence)."
+            )
+        if report.edge_suggestions:
+            actions.append(
+                "Review edge_suggestions / pending edge proposals carefully — "
+                "default types are contradicts/related_to at low confidence."
             )
         if report.concept_candidates:
             top = ", ".join(c.label for c in report.concept_candidates[:5])
             actions.append(
                 f"Consider explicit extracted_concepts on ingest for: {top}"
             )
-        actions.append(
-            "Next iteration: embedding-similarity contradiction check + optional "
-            "LLM verification behind a feature flag (still report-only by default)."
-        )
+        actions.append("Run `grmc eval` periodically to watch over-confidence drift.")
         return actions
 
     def _finalize(

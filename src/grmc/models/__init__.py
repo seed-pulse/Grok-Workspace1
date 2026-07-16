@@ -5,6 +5,7 @@ from .proposal import Proposal
 from .reflection_report import (
     ConceptCandidate,
     ContradictionFlag,
+    EdgeSuggestion,
     ReflectionReport,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "Proposal",
     "ConceptCandidate",
     "ContradictionFlag",
+    "EdgeSuggestion",
     "ReflectionReport",
 ]

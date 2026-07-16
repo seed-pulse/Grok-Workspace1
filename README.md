@@ -1,67 +1,57 @@
 # GRMC - Grok Reflective Memory Core
 
-**v0.4.0** — Graph edges + provenance · SQLite SoR · Approval queue · Reflection · Bridge
-
-Standalone, local-first reflective memory for Grok (and other LLMs).
+**v0.5.0** — Soft edge suggestions · embedding tension · eval · migrator · edges/provenance · approval · reflection · bridge
 
 ## Philosophy
 
-- Prefer **missing** a memory over injecting a **wrong high-confidence** belief
-- **Think** (reflection) and **write** (approval) are strictly separated
-- Graph changes (nodes **and** edges) only after **human `approve`**
-- Every approved concept should answer: **which episodes justify this?**
+- Prefer **missing** a signal over a **wrong high-confidence** belief
+- **Think** (`reflect`) never writes the graph (`mutates_memory=False`)
+- **Write** only via human `approve` (nodes **and** edges)
+- Provenance: every approved concept should answer *which episodes justify this?*
 
 ## Architecture
 
 ```
-Ingest ──► SQLite episodes (SoR) + Chroma vectors
-
-Reflect ──► report (mutates_memory=False) + pending concept proposals
-
-Approve concept ──► GraphNode + episode_node_links (provenance)
-Approve edge    ──► GraphEdge (node → node)
-
-edges propose   ──► pending edge proposal only
+Ingest     → SQLite episodes + Chroma vectors
+Reflect    → report + pending concept/edge proposals (no graph write)
+Approve    → GraphNode / GraphEdge + episode_node_links
+ops eval   → health checks (over-confidence, provenance)
+ops migrate-legacy → Chroma → SQLite (additive)
 ```
 
 ## Quick start
 
 ```bash
 pip install -e .
-grmc ingest -t "Human oversight protects long-term memory." \
-  -c "human_oversight,long_term_memory" --embedder hashing
+grmc ingest -t "..." -c "human_oversight,long_term_memory" --embedder hashing
 grmc reflect --embedder hashing
 grmc propose
-grmc approve prop_........ --note "ok"
-grmc node node_........ --with-provenance --with-edges
-
-# Edges (second node first)
-grmc approve prop_other...
-grmc edges propose --from node_a --to node_b --type supports -e ep_...
-grmc approve prop_edge...
+grmc propose --kind edge
+grmc approve prop_...
+grmc node node_... --provenance
 grmc edges list
+grmc ops eval
 ```
 
-## Commands (v0.4)
+## Commands
 
 | Command | Role |
 |---------|------|
-| `grmc reflect` | Think; enqueue concept proposals |
-| `grmc propose` | List proposals (`kind` column) |
-| `grmc approve <id>` | Write node **or** edge + provenance |
-| `grmc approve … --link-to node_x` | Also enqueue related edge (still pending) |
-| `grmc node <id>` | Detail + provenance + incident edges |
-| `grmc nodes` | List nodes |
-| `grmc edges list / propose / types` | Edge inspection & propose |
-| `grmc reject <id>` | Dismiss proposal |
+| `grmc reflect` | Think; optional concept + soft edge proposals |
+| `grmc propose [--kind edge]` | Approval queue |
+| `grmc approve / reject` | Human gate writes |
+| `grmc node <id> --provenance` | Why this node? + edges |
+| `grmc edges propose/list/types` | Manual edge proposals |
+| `grmc ops eval` | Conservative health score |
+| `grmc ops migrate-legacy` | Import old Chroma episodes into SQLite |
 | `grmc bridge *` | Dual-Grok file channel |
 
 ## Docs
 
-- [`docs/EDGES_AND_PROVENANCE.md`](docs/EDGES_AND_PROVENANCE.md)
-- [`docs/APPROVAL_AND_SQLITE.md`](docs/APPROVAL_AND_SQLITE.md)
-- [`docs/Reflection_Engine_v0.md`](docs/Reflection_Engine_v0.md)
-- [`docs/BRIDGE.md`](docs/BRIDGE.md)
+- `docs/EDGES_AND_PROVENANCE.md`
+- `docs/APPROVAL_AND_SQLITE.md`
+- `docs/V05_NOTES.md`
+- `docs/BRIDGE.md`
 
 ## Tests
 
@@ -69,21 +59,28 @@ grmc edges list
 pytest -q
 ```
 
+## Safety caps (defaults)
+
+| Object | Soft max on approve |
+|------|---------------------|
+| Node | 0.55 |
+| Edge | 0.45 |
+| Soft edge suggestion | 0.30 |
+
 ## Known limitations
 
-1. Edges are **not** auto-inferred from reflection (manual `edges propose` only for now)
-2. No multi-hop path queries / graph visualization UI
-3. Provenance is written on concept approve; historical nodes approved before v0.4 lack links unless re-approved/merged
-4. Legacy Chroma-only data (pre-0.3) still needs re-ingest
-5. Contradiction edges are not auto-created from reflection flags
+1. Soft edges require **existing** endpoint nodes (will not invent nodes)
+2. Embedding tension quality depends on embedder (hashing is weaker)
+3. Migrator does not re-build Chroma vectors for migrated rows
+4. No multi-hop graph query UI yet
+5. No LLM verification yet (feature-flag candidate)
 
-## Next (v0.5 candidates)
+## Next (beyond 0.5)
 
-1. Soft edge *suggestions* from reflection contradictions (still pending, low conf)
-2. Graph path / neighborhood query CLI
-3. Optional LLM verification of edge proposals (feature-flagged)
-4. Eval harness for provenance coverage
-5. Export graph as JSON/GraphML for external tools
+- LLM-assisted verification (flagged, default off)
+- Graph neighborhood / path CLI
+- Stronger eval suites & fixtures
+- Optional encrypted raw_turns
 
 ---
 

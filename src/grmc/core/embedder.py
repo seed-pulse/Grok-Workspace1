@@ -21,6 +21,22 @@ class Embedder(Protocol):
         ...
 
 
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Cosine similarity in [-1, 1]; 0.0 if either vector is empty/degenerate."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
 class HashingEmbedder:
     """Lightweight bag-of-token hashing embedder (no ML deps).
 
