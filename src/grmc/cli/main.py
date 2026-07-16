@@ -158,39 +158,46 @@ def status(
     n_concept = sum(1 for p in pending if p.kind in ("concept_candidate", "manual"))
     n_edge = sum(1 for p in pending if p.kind == "edge")
 
+    from grmc import __version__ as grmc_version
+
     console.print(
         Panel.fit(
-            f"[bold]GRMC v0.8[/bold]  ·  think ≠ write  ·  approve-only graph\n"
-            f"data: [cyan]{data_path}[/cyan]\n"
-            f"sqlite: {stats['db_path']}",
+            f"[bold]GRMC {grmc_version}[/bold]\n"
+            f"[dim]think ≠ write · approve-only graph · LLM default off[/dim]\n\n"
+            f"data    [cyan]{data_path}[/cyan]\n"
+            f"sqlite  {stats['db_path']}",
             title="Status",
             border_style="cyan",
         )
     )
 
-    counts = Table(title="Memory & graph", show_header=True)
-    counts.add_column("Metric")
-    counts.add_column("Value", justify="right", style="cyan")
-    counts.add_row("Episodes", str(stats.get("episodes", 0)))
-    counts.add_row("Graph nodes", str(stats.get("graph_nodes", 0)))
-    counts.add_row("Graph edges", str(stats.get("graph_edges", 0)))
-    counts.add_row("Provenance links", str(stats.get("episode_node_links", 0)))
-    counts.add_row("Reflection reports", str(stats.get("reflections", 0)))
-    counts.add_row("Schema version", str(stats.get("schema_version", "?")))
+    counts = Table(show_header=True, title="Memory & graph", expand=False)
+    counts.add_column("Metric", style="white")
+    counts.add_column("Value", justify="right", style="bold cyan")
+    for label, key in (
+        ("Episodes", "episodes"),
+        ("Graph nodes", "graph_nodes"),
+        ("Graph edges", "graph_edges"),
+        ("Provenance links", "episode_node_links"),
+        ("Reflection reports", "reflections"),
+        ("Schema version", "schema_version"),
+    ):
+        counts.add_row(label, str(stats.get(key, 0 if key != "schema_version" else "?")))
     console.print(counts)
 
-    prop_table = Table(title="Approval queue", show_header=True)
+    prop_table = Table(show_header=True, title="Approval queue")
     prop_table.add_column("State")
-    prop_table.add_column("Count", justify="right")
-    prop_table.add_row("Pending (all)", str(stats.get("proposals_pending", 0)))
-    prop_table.add_row("  · concepts/manual", str(n_concept))
-    prop_table.add_row("  · edges", str(n_edge))
-    prop_table.add_row("Total proposals ever", str(stats.get("proposals_total", 0)))
+    prop_table.add_column("Count", justify="right", style="bold")
+    pending_all = int(stats.get("proposals_pending", 0))
+    prop_table.add_row("Pending total", f"[yellow]{pending_all}[/yellow]" if pending_all else "0")
+    prop_table.add_row("  concepts / manual", str(n_concept))
+    prop_table.add_row("  edges", str(n_edge))
+    prop_table.add_row("All proposals (lifetime)", str(stats.get("proposals_total", 0)))
     console.print(prop_table)
 
     if pending:
-        preview = Table(title="Pending preview (up to 5)")
-        preview.add_column("ID", style="yellow")
+        preview = Table(title="Pending preview (up to 5)", show_lines=False)
+        preview.add_column("ID", style="yellow", no_wrap=True)
         preview.add_column("Kind")
         preview.add_column("Label")
         preview.add_column("Conf", justify="right")
@@ -202,7 +209,11 @@ def status(
                 f"{p.confidence:.2f}",
             )
         console.print(preview)
-        console.print("[dim]Next: grmc propose  ·  grmc approve <id>  ·  grmc reject <id>[/dim]")
+        console.print(
+            "[dim]→ grmc propose · grmc approve <id> · grmc reject <id>[/dim]"
+        )
+    else:
+        console.print("[dim]Approval queue empty.[/dim]")
 
     latest = db.latest_reflection()
     if latest:
@@ -210,31 +221,28 @@ def status(
         mm_style = "red" if mm else "green"
         console.print(
             Panel.fit(
-                f"report_id: [cyan]{latest.get('report_id')}[/cyan]\n"
-                f"timestamp: {latest.get('timestamp')}\n"
-                f"mode: {latest.get('mode')}  episodes_analyzed: {latest.get('episodes_analyzed')}\n"
-                f"mutates_memory: [{mm_style}]{mm}[/{mm_style}] "
-                f"[dim](must be False)[/dim]",
+                f"[cyan]{latest.get('report_id')}[/cyan]\n"
+                f"{latest.get('timestamp')}\n"
+                f"mode={latest.get('mode')}  episodes={latest.get('episodes_analyzed')}\n"
+                f"mutates_memory=[{mm_style}]{mm}[/{mm_style}]",
                 title="Last reflection",
                 border_style="green" if not mm else "red",
             )
         )
     else:
-        console.print("[dim]No reflections yet — run: grmc reflect[/dim]")
+        console.print("[dim]No reflections yet → grmc reflect[/dim]")
 
-    # LLM audit
     try:
         from ..llm.audit import LLMAuditLog
 
         llm_sum = LLMAuditLog(data_dir).summary()
+        calls = llm_sum["calls"]
         console.print(
             Panel.fit(
-                f"calls={llm_sum['calls']}  success={llm_sum['success']}  "
-                f"failed={llm_sum['failed']}\n"
-                f"total_tokens_est={llm_sum['total_tokens_est']}  "
-                f"by_purpose={llm_sum['by_purpose'] or '{}'}\n"
+                f"calls={calls}  ok={llm_sum['success']}  fail={llm_sum['failed']}  "
+                f"tokens≈{llm_sum['total_tokens_est']}\n"
                 f"[dim]{llm_sum['path']}[/dim]\n"
-                f"[dim]LLM default OFF — enable with GRMC_LLM=1 or reflect --llm[/dim]",
+                f"[dim]default OFF · GRMC_LLM=1 or reflect --llm · grmc ops llm-log[/dim]",
                 title="LLM audit",
                 border_style="dim",
             )
@@ -243,7 +251,7 @@ def status(
         console.print(f"[dim]LLM audit unavailable: {exc}[/dim]")
 
     console.print(
-        "[dim]Docs: docs/QUICKSTART.md · docs/DESIGN_PRINCIPLES.md · docs/HANDOVER.md[/dim]"
+        "[dim]docs/QUICKSTART.md · DESIGN_PRINCIPLES.md · HANDOVER.md[/dim]"
     )
 
 

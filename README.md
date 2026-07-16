@@ -1,11 +1,14 @@
 # GRMC — Grok Reflective Memory Core
 
-**v0.8.0** · Local-first reflective memory · Human-gated knowledge graph · Optional LLM (default off)
+**v0.8.1** · Local-first reflective memory · Human-gated knowledge graph · Optional LLM (default off)
 
-[![status](https://img.shields.io/badge/status-experimental-blue)](#)
+[![status](https://img.shields.io/badge/status-stable_experiment-blue)](#)
 [![safety](https://img.shields.io/badge/graph_writes-approve_only-green)](#)
 
 Repository: https://github.com/seed-pulse/Grok-Workspace1
+
+> **Project status:** safe stopping point for the experiment.  
+> Core loop and safety rules are settled; further work is optional polish, not required for “done.”
 
 ---
 

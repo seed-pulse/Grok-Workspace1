@@ -1,7 +1,8 @@
 # Handover — GRMC (Grok Reflective Memory Core)
 
-**As of:** 2026-07-17 · **Code version:** 0.8.x  
+**As of:** 2026-07-17 · **Code version:** 0.8.1  
 **Repo:** https://github.com/seed-pulse/Grok-Workspace1  
+**Stop status:** intentional clean pause — do not treat missing features as incomplete delivery.
 
 This note is for a future maintainer (including future-you) who needs to continue the experiment without re-deriving the intent from scratch.
 
@@ -86,9 +87,9 @@ Current suite covers reflection safety, approval gates, edges/provenance, path q
 
 ---
 
-## Suggested next work (not required for “done”)
+## Suggested next work (optional only)
 
-Ordered for *continuing the experiment*, not productizing:
+**Not required for “done.”** Resume only if the experiment continues:
 
 1. Stronger eval fixtures loaded by one command  
 2. Better multi-path ranking for `graph path` (still read-only)  
@@ -97,6 +98,13 @@ Ordered for *continuing the experiment*, not productizing:
 5. GraphML export for external visualization  
 
 Avoid: silent auto-approve, raising default conf caps, coupling to grok.com login automation as the primary bridge.
+
+## Definition of “good enough to stop”
+
+- `pytest -q` is green  
+- `grmc status` shows a coherent dashboard  
+- README + QUICKSTART + DESIGN_PRINCIPLES + HANDOVER exist and match the code  
+- Safety loop holds: reflect never writes graph; only approve does
 
 ---
 

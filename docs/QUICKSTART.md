@@ -1,6 +1,6 @@
 # GRMC Quick Start
 
-**Version:** 0.8 · Local-first reflective memory with human-gated graph writes
+**Version:** 0.8.1 · Local-first reflective memory with human-gated graph writes
 
 ## Install
 
