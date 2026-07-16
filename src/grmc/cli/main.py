@@ -15,12 +15,14 @@ from ..core.memory_manager import MemoryManager
 from ..models.episode import Episode
 from ..storage.sqlite_store import SQLiteStore
 from .bridge_cmd import bridge_app
+from .edges_cmd import edges_app
 
 app = typer.Typer(
     help="GRMC - Grok Reflective Memory Core (think via reflect, write via approve)",
     no_args_is_help=True,
 )
 app.add_typer(bridge_app, name="bridge")
+app.add_typer(edges_app, name="edges")
 console = Console()
 
 DEFAULT_DATA_DIR = "./grmc_data"
@@ -157,8 +159,15 @@ def status(
         f"Proposals: pending=[yellow]{stats['proposals_pending']}[/yellow] "
         f"total={stats['proposals_total']}"
     )
-    console.print(f"Graph nodes: [cyan]{stats['graph_nodes']}[/cyan]")
-    console.print(f"Reflection reports (SQLite): {stats['reflections']}")
+    console.print(
+        f"Graph nodes: [cyan]{stats['graph_nodes']}[/cyan]  "
+        f"edges: [cyan]{stats.get('graph_edges', 0)}[/cyan]  "
+        f"provenance links: [cyan]{stats.get('episode_node_links', 0)}[/cyan]"
+    )
+    console.print(
+        f"Reflection reports (SQLite): {stats['reflections']}  "
+        f"schema_v={stats.get('schema_version', '?')}"
+    )
 
     try:
         from ..core.embedder import create_embedder
@@ -356,19 +365,19 @@ def propose(
 
     table = Table(title=f"Proposals ({status})")
     table.add_column("ID", style="cyan")
+    table.add_column("Kind")
     table.add_column("Status")
     table.add_column("Label")
     table.add_column("Conf", justify="right")
     table.add_column("Source")
-    table.add_column("Report")
     for p in items:
         table.add_row(
             p.proposal_id,
+            p.kind,
             p.status,
-            p.label[:40],
+            p.label[:48],
             f"{p.confidence:.2f}",
             p.source,
-            (p.report_id or "")[:16],
         )
     console.print(table)
     console.print(
@@ -380,41 +389,78 @@ def propose(
 def approve(
     proposal_id: str = typer.Argument(..., help="Proposal id (prop_...)"),
     note: Optional[str] = typer.Option(None, "--note", help="Optional review note"),
-    confidence_cap: float = typer.Option(
-        0.55,
+    confidence_cap: Optional[float] = typer.Option(
+        None,
         "--cap",
-        help="Max confidence on first approval (conservative default 0.55)",
+        help="Max confidence (default 0.55 nodes / 0.45 edges)",
     ),
     node_type: str = typer.Option(
         "concept",
         "--type",
         help="Graph node type: concept | belief | fact | user_model | self_model",
     ),
+    link_to: Optional[str] = typer.Option(
+        None,
+        "--link-to",
+        help="After node approve, enqueue a *pending* related_to edge to this node id",
+    ),
+    link_type: str = typer.Option(
+        "related_to",
+        "--link-type",
+        help="Edge type used with --link-to",
+    ),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
 ):
-    """Approve a pending proposal → create/update GraphNode (first graph write)."""
+    """Approve a pending proposal → write GraphNode or GraphEdge (+ provenance)."""
     manager = _manager(data_dir, embedder="hashing")
     try:
-        node = manager.approval.approve(
+        result = manager.approval.approve(
             proposal_id,
             node_type=node_type,  # type: ignore[arg-type]
             confidence_cap=confidence_cap,
             note=note,
+            also_link_related=bool(link_to),
+            related_to_node_id=link_to,
+            related_edge_type=link_type,
         )
     except (KeyError, ValueError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
+    if result["kind"] == "edge":
+        edge = result["edge"]
+        console.print(
+            Panel.fit(
+                f"[bold]{edge.edge_id}[/bold]\n"
+                f"{edge.source_node_id} -[{edge.edge_type}]-> {edge.target_node_id}\n"
+                f"confidence={edge.confidence:.2f}\n"
+                f"episodes={len(edge.supporting_episode_ids)}",
+                title="GraphEdge written (human approved)",
+                border_style="green",
+            )
+        )
+        return
+
+    node = result["node"]
+    n_links = len(result.get("provenance_links") or [])
     console.print(
         Panel.fit(
             f"[bold]{node.node_id}[/bold]\n"
             f"label={node.label}\n"
             f"type={node.type}  confidence={node.confidence:.2f}  version={node.version}\n"
-            f"supports={len(node.supporting_episodes)}",
+            f"supporting_episodes={len(node.supporting_episodes)}  "
+            f"provenance_links_written={n_links}",
             title="GraphNode written (human approved)",
             border_style="green",
         )
     )
+    related = result.get("related_edge_proposal")
+    if related:
+        console.print(
+            f"[yellow]Pending edge proposal enqueued:[/yellow] {related.proposal_id}\n"
+            f"  {related.label}\n"
+            f"  Approve with: grmc approve {related.proposal_id}"
+        )
 
 
 @app.command()
@@ -460,6 +506,97 @@ def nodes_cmd(
             str(len(n.supporting_episodes)),
         )
     console.print(table)
+    console.print("[dim]Detail: grmc node <id> --with-edges[/dim]")
+
+
+@app.command("node")
+def node_cmd(
+    node_id: str = typer.Argument(..., help="Node id (node_...)"),
+    with_edges: bool = typer.Option(
+        True,
+        "--with-edges/--no-edges",
+        help="Show incident edges",
+    ),
+    with_provenance: bool = typer.Option(
+        True,
+        "--with-provenance/--no-provenance",
+        help="Show episode↔node provenance links",
+    ),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+):
+    """Show one GraphNode with optional edges and provenance ('why this node?')."""
+    db = _sqlite(data_dir)
+    node = db.get_graph_node(node_id)
+    if node is None:
+        console.print(f"[red]Unknown node: {node_id}[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        Panel.fit(
+            f"[bold]{node.node_id}[/bold]\n"
+            f"label={node.label}\n"
+            f"type={node.type}  confidence={node.confidence:.2f}  version={node.version}\n"
+            f"supporting_episodes={node.supporting_episodes}\n"
+            f"metadata={node.metadata}",
+            title="GraphNode",
+            border_style="cyan",
+        )
+    )
+
+    if with_provenance:
+        links = db.list_links_for_node(node_id)
+        if not links:
+            console.print("[dim]No provenance links recorded for this node.[/dim]")
+        else:
+            table = Table(title="Provenance (episode → node)")
+            table.add_column("Link ID", style="cyan")
+            table.add_column("Episode")
+            table.add_column("Relation")
+            table.add_column("Conf", justify="right")
+            table.add_column("Proposal")
+            table.add_column("Episode summary")
+            for link in links:
+                ep = db.get_episode(link.episode_id)
+                summary = (ep.get("summary") if ep else "") or ""
+                if len(summary) > 50:
+                    summary = summary[:50] + "…"
+                table.add_row(
+                    link.link_id,
+                    link.episode_id,
+                    link.relation,
+                    f"{link.confidence:.2f}",
+                    (link.proposal_id or "")[:14],
+                    summary,
+                )
+            console.print(table)
+
+    if with_edges:
+        edges = db.list_graph_edges(node_id=node_id, limit=50)
+        if not edges:
+            console.print("[dim]No edges touch this node.[/dim]")
+        else:
+            table = Table(title="Incident edges")
+            table.add_column("Edge ID", style="cyan")
+            table.add_column("Direction")
+            table.add_column("Type")
+            table.add_column("Other")
+            table.add_column("Conf", justify="right")
+            for e in edges:
+                if e.source_node_id == node_id:
+                    direction = "out"
+                    other_id = e.target_node_id
+                else:
+                    direction = "in"
+                    other_id = e.source_node_id
+                other = db.get_graph_node(other_id)
+                table.add_row(
+                    e.edge_id,
+                    direction,
+                    e.edge_type,
+                    (other.label if other else other_id)[:30],
+                    f"{e.confidence:.2f}",
+                )
+            console.print(table)
 
 
 if __name__ == "__main__":

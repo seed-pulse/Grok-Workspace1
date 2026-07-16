@@ -9,11 +9,12 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 ProposalStatus = Literal["pending", "approved", "rejected"]
-ProposalKind = Literal["concept_candidate", "manual"]
+# concept_candidate / manual → GraphNode; edge → GraphEdge
+ProposalKind = Literal["concept_candidate", "manual", "edge"]
 
 
 class Proposal(BaseModel):
-    """Human-gated suggestion produced by reflection (or manual entry)."""
+    """Human-gated suggestion produced by reflection or manual entry."""
 
     model_config = ConfigDict()
 
@@ -29,4 +30,10 @@ class Proposal(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
     reviewed_at: Optional[datetime] = None
     resulting_node_id: Optional[str] = None
+    # For edge approvals we also store resulting edge id in payload / resulting_node_id
+    # reused loosely; prefer payload["resulting_edge_id"] after approve.
     review_note: Optional[str] = None
+
+    @property
+    def is_edge(self) -> bool:
+        return self.kind == "edge" or bool(self.payload.get("edge_type"))

@@ -77,10 +77,15 @@ def test_approve_is_only_graph_write(tmp_path: Path):
     assert len(created) == 1
     assert db.count_graph_nodes() == 0
 
-    node = queue.approve(created[0].proposal_id, confidence_cap=0.55)
+    result = queue.approve(created[0].proposal_id, confidence_cap=0.55)
+    node = result["node"]
+    assert result["kind"] == "node"
     assert node.label == "conservative_memory"
     assert node.confidence <= 0.55
     assert db.count_graph_nodes() == 1
+    # Provenance links for supporting episodes
+    assert len(result["provenance_links"]) == 2
+    assert db.count_episode_node_links() == 2
 
     prop = db.get_proposal(created[0].proposal_id)
     assert prop is not None

@@ -1,6 +1,6 @@
 # GRMC - Grok Reflective Memory Core
 
-**v0.3.0** — SQLite system of record + Approval Queue + Reflection (report-only) + Bridge
+**v0.4.0** — Graph edges + provenance · SQLite SoR · Approval queue · Reflection · Bridge
 
 Standalone, local-first reflective memory for Grok (and other LLMs).
 
@@ -8,92 +8,83 @@ Standalone, local-first reflective memory for Grok (and other LLMs).
 
 - Prefer **missing** a memory over injecting a **wrong high-confidence** belief
 - **Think** (reflection) and **write** (approval) are strictly separated
-- Graph changes only after **human `approve`**
-- Chroma = vectors only; **SQLite** = chronology, proposals, graph, history
+- Graph changes (nodes **and** edges) only after **human `approve`**
+- Every approved concept should answer: **which episodes justify this?**
 
-## Architecture (v0.3)
+## Architecture
 
 ```
-Ingest ──► SQLite episodes (SoR, timestamp index)
-       └─► Chroma embeddings (semantic search)
+Ingest ──► SQLite episodes (SoR) + Chroma vectors
 
-Reflect ──► ReflectionReport (mutates_memory=False)
-        └─► pending proposals (no graph write)
+Reflect ──► report (mutates_memory=False) + pending concept proposals
 
-Approve ──► GraphNode in SQLite   ← only graph write path
+Approve concept ──► GraphNode + episode_node_links (provenance)
+Approve edge    ──► GraphEdge (node → node)
+
+edges propose   ──► pending edge proposal only
 ```
 
 ## Quick start
 
 ```bash
-cd grmc
 pip install -e .
-# or: pip install -e ".[dev]"
-
-grmc ingest -t "長期記憶は continuity に重要" -c "長期記憶,continuity" --embedder hashing
-grmc list -n 5
-grmc reflect --recent -n 20 --embedder hashing
+grmc ingest -t "Human oversight protects long-term memory." \
+  -c "human_oversight,long_term_memory" --embedder hashing
+grmc reflect --embedder hashing
 grmc propose
-grmc approve prop_........     # first graph write
-grmc nodes
-grmc status
+grmc approve prop_........ --note "ok"
+grmc node node_........ --with-provenance --with-edges
+
+# Edges (second node first)
+grmc approve prop_other...
+grmc edges propose --from node_a --to node_b --type supports -e ep_...
+grmc approve prop_edge...
+grmc edges list
 ```
 
-## Commands
+## Commands (v0.4)
 
 | Command | Role |
 |---------|------|
-| `grmc ingest` | Episode → SQLite + Chroma |
-| `grmc retrieve` | Semantic search (Chroma) |
-| `grmc list` | Recent episodes (SQLite index) |
-| `grmc reflect` | Think / report; enqueue proposals |
-| `grmc propose` | List or `--add` pending proposals |
-| `grmc approve <id>` | **Write** GraphNode (capped conf) |
+| `grmc reflect` | Think; enqueue concept proposals |
+| `grmc propose` | List proposals (`kind` column) |
+| `grmc approve <id>` | Write node **or** edge + provenance |
+| `grmc approve … --link-to node_x` | Also enqueue related edge (still pending) |
+| `grmc node <id>` | Detail + provenance + incident edges |
+| `grmc nodes` | List nodes |
+| `grmc edges list / propose / types` | Edge inspection & propose |
 | `grmc reject <id>` | Dismiss proposal |
-| `grmc nodes` | List graph nodes |
-| `grmc status` | Counts + last reflection |
 | `grmc bridge *` | Dual-Grok file channel |
-
-## Approval examples
-
-```bash
-grmc reflect --embedder hashing
-grmc propose
-grmc approve prop_abc123def456 --note "looks solid"
-grmc approve prop_... --cap 0.5 --type belief
-grmc reject prop_... --note "too noisy"
-grmc propose --add "self_model_continuity"
-```
-
-## Tests
-
-```bash
-pip install -e ".[dev]"
-pytest -q
-```
 
 ## Docs
 
+- [`docs/EDGES_AND_PROVENANCE.md`](docs/EDGES_AND_PROVENANCE.md)
 - [`docs/APPROVAL_AND_SQLITE.md`](docs/APPROVAL_AND_SQLITE.md)
 - [`docs/Reflection_Engine_v0.md`](docs/Reflection_Engine_v0.md)
 - [`docs/BRIDGE.md`](docs/BRIDGE.md)
 
+## Tests
+
+```bash
+pytest -q
+```
+
 ## Known limitations
 
-1. Old Chroma-only data (pre-0.3 under `grmc_data/` root) is not auto-migrated to SQLite — re-ingest or migrate manually.
-2. Concept extraction remains heuristic unless `--concepts` is set.
-3. Contradiction detection is still weak / conservative.
-4. No multi-user auth; local single-operator approval.
-5. Graph edges (relations between nodes) not yet modeled.
+1. Edges are **not** auto-inferred from reflection (manual `edges propose` only for now)
+2. No multi-hop path queries / graph visualization UI
+3. Provenance is written on concept approve; historical nodes approved before v0.4 lack links unless re-approved/merged
+4. Legacy Chroma-only data (pre-0.3) still needs re-ingest
+5. Contradiction edges are not auto-created from reflection flags
 
-## Next ideas
+## Next (v0.5 candidates)
 
-1. Graph **edges** + provenance links episode↔node  
-2. Embedding pairwise tension in reflection  
-3. Optional LLM verification (feature-flagged)  
-4. Eval harness for over-confidence  
-5. Migration tool from legacy Chroma-only stores  
+1. Soft edge *suggestions* from reflection contradictions (still pending, low conf)
+2. Graph path / neighborhood query CLI
+3. Optional LLM verification of edge proposals (feature-flagged)
+4. Eval harness for provenance coverage
+5. Export graph as JSON/GraphML for external tools
 
 ---
 
-Built as a long-term memory experiment: **conservative, reflective, human-gated.**
+**Conservative · Reflective · Provenance-aware · Human-gated.**

@@ -5,10 +5,12 @@
 | Layer | Role | Writes graph? |
 |-------|------|----------------|
 | **Reflection** | Think — report + optional pending proposals | No |
-| **Approval queue** | Human review of proposals | No until approve |
-| **`grmc approve`** | Explicit graph write | **Yes** |
+| **Approval queue** | Human review of proposals (concept **or** edge) | No until approve |
+| **`grmc approve`** | Explicit graph write (node and/or edge + provenance) | **Yes** |
 | **ChromaDB** | Vector search only | No |
-| **SQLite** | Episodes, reflection history, proposals, nodes | SoR |
+| **SQLite** | Episodes, reflections, proposals, nodes, **edges**, **episode_node_links** | SoR |
+
+See also [`EDGES_AND_PROVENANCE.md`](EDGES_AND_PROVENANCE.md) (v0.4).
 
 ## SQLite schema (essentials)
 

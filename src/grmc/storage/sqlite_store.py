@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from ..models.episode import Episode
+from ..models.graph_edge import EpisodeNodeLink, GraphEdge
 from ..models.graph_node import GraphNode
 from ..models.proposal import Proposal
 from ..models.reflection_report import ReflectionReport
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -90,6 +91,39 @@ CREATE TABLE IF NOT EXISTS graph_nodes (
 );
 CREATE INDEX IF NOT EXISTS idx_graph_nodes_label
     ON graph_nodes(label);
+
+CREATE TABLE IF NOT EXISTS graph_edges (
+    edge_id TEXT PRIMARY KEY,
+    source_node_id TEXT NOT NULL,
+    target_node_id TEXT NOT NULL,
+    edge_type TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.35,
+    proposal_id TEXT,
+    report_id TEXT,
+    supporting_episode_ids TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(source_node_id, target_node_id, edge_type)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source_node_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target_node_id);
+CREATE INDEX IF NOT EXISTS idx_edges_type ON graph_edges(edge_type);
+
+CREATE TABLE IF NOT EXISTS episode_node_links (
+    link_id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    relation TEXT NOT NULL DEFAULT 'supports',
+    proposal_id TEXT,
+    report_id TEXT,
+    confidence REAL NOT NULL DEFAULT 0.35,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(episode_id, node_id, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_enl_episode ON episode_node_links(episode_id);
+CREATE INDEX IF NOT EXISTS idx_enl_node ON episode_node_links(node_id);
 """
 
 
@@ -140,7 +174,7 @@ class SQLiteStore:
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
             conn.execute(
-                "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
 
@@ -516,12 +550,259 @@ class SQLiteStore:
             metadata=_json_loads(row["metadata"], {}),
         )
 
+    # ------------------------------------------------------------------
+    # Graph edges (node ↔ node; written only via approval)
+    # ------------------------------------------------------------------
+
+    def add_graph_edge(self, edge: GraphEdge) -> str:
+        now = datetime.utcnow().isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO graph_edges (
+                    edge_id, source_node_id, target_node_id, edge_type,
+                    confidence, proposal_id, report_id, supporting_episode_ids,
+                    metadata, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    edge.edge_id,
+                    edge.source_node_id,
+                    edge.target_node_id,
+                    edge.edge_type,
+                    float(edge.confidence),
+                    edge.proposal_id,
+                    edge.report_id,
+                    _json_dumps(edge.supporting_episode_ids),
+                    _json_dumps(edge.metadata),
+                    _dt_iso(edge.created_at) if edge.created_at else now,
+                    now,
+                ),
+            )
+        return edge.edge_id
+
+    def get_graph_edge(self, edge_id: str) -> Optional[GraphEdge]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM graph_edges WHERE edge_id = ?",
+                (edge_id,),
+            ).fetchone()
+        return self._row_to_edge(row) if row else None
+
+    def find_edge(
+        self,
+        source_node_id: str,
+        target_node_id: str,
+        edge_type: str,
+    ) -> Optional[GraphEdge]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM graph_edges
+                WHERE source_node_id = ? AND target_node_id = ? AND edge_type = ?
+                """,
+                (source_node_id, target_node_id, edge_type),
+            ).fetchone()
+        return self._row_to_edge(row) if row else None
+
+    def list_graph_edges(
+        self,
+        *,
+        node_id: Optional[str] = None,
+        edge_type: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[GraphEdge]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if node_id:
+            clauses.append("(source_node_id = ? OR target_node_id = ?)")
+            params.extend([node_id, node_id])
+        if edge_type:
+            clauses.append("edge_type = ?")
+            params.append(edge_type)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(max(0, limit))
+        sql = f"""
+            SELECT * FROM graph_edges
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+        """
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
+    def count_graph_edges(self) -> int:
+        with self._conn() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM graph_edges").fetchone()
+            return int(row["n"]) if row else 0
+
+    def update_graph_edge(self, edge: GraphEdge) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE graph_edges SET
+                    confidence = ?,
+                    proposal_id = ?,
+                    report_id = ?,
+                    supporting_episode_ids = ?,
+                    metadata = ?,
+                    updated_at = ?
+                WHERE edge_id = ?
+                """,
+                (
+                    float(edge.confidence),
+                    edge.proposal_id,
+                    edge.report_id,
+                    _json_dumps(edge.supporting_episode_ids),
+                    _json_dumps(edge.metadata),
+                    datetime.utcnow().isoformat(),
+                    edge.edge_id,
+                ),
+            )
+
+    def find_pending_edge_proposal(
+        self,
+        source_node_id: str,
+        target_node_id: str,
+        edge_type: str,
+    ) -> Optional[Proposal]:
+        """Find a pending edge proposal matching endpoints + type."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM proposals
+                WHERE status = 'pending' AND kind = 'edge'
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        for row in rows:
+            prop = self._row_to_proposal(row)
+            payload = prop.payload or {}
+            if (
+                payload.get("source_node_id") == source_node_id
+                and payload.get("target_node_id") == target_node_id
+                and payload.get("edge_type") == edge_type
+            ):
+                return prop
+        return None
+
+    def _row_to_edge(self, row: sqlite3.Row) -> GraphEdge:
+        return GraphEdge(
+            edge_id=row["edge_id"],
+            source_node_id=row["source_node_id"],
+            target_node_id=row["target_node_id"],
+            edge_type=row["edge_type"],  # type: ignore[arg-type]
+            confidence=float(row["confidence"]),
+            proposal_id=row["proposal_id"],
+            report_id=row["report_id"],
+            supporting_episode_ids=_json_loads(row["supporting_episode_ids"], []),
+            metadata=_json_loads(row["metadata"], {}),
+            created_at=datetime.fromisoformat(row["created_at"])
+            if row["created_at"]
+            else datetime.utcnow(),
+            updated_at=datetime.fromisoformat(row["updated_at"])
+            if row["updated_at"]
+            else datetime.utcnow(),
+        )
+
+    # ------------------------------------------------------------------
+    # Episode ↔ node provenance
+    # ------------------------------------------------------------------
+
+    def add_episode_node_link(self, link: EpisodeNodeLink) -> str:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO episode_node_links (
+                    link_id, episode_id, node_id, relation, proposal_id,
+                    report_id, confidence, note, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    link.link_id,
+                    link.episode_id,
+                    link.node_id,
+                    link.relation,
+                    link.proposal_id,
+                    link.report_id,
+                    float(link.confidence),
+                    link.note,
+                    _dt_iso(link.created_at),
+                ),
+            )
+            # Keep denormalized episode.linked_graph_nodes in sync
+            row = conn.execute(
+                "SELECT linked_graph_nodes FROM episodes WHERE episode_id = ?",
+                (link.episode_id,),
+            ).fetchone()
+            if row:
+                linked = _json_loads(row["linked_graph_nodes"], [])
+                if not isinstance(linked, list):
+                    linked = []
+                if link.node_id not in linked:
+                    linked.append(link.node_id)
+                    conn.execute(
+                        "UPDATE episodes SET linked_graph_nodes = ? WHERE episode_id = ?",
+                        (_json_dumps(linked), link.episode_id),
+                    )
+        return link.link_id
+
+    def list_links_for_node(self, node_id: str) -> List[EpisodeNodeLink]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM episode_node_links
+                WHERE node_id = ?
+                ORDER BY created_at DESC
+                """,
+                (node_id,),
+            ).fetchall()
+        return [self._row_to_link(r) for r in rows]
+
+    def list_links_for_episode(self, episode_id: str) -> List[EpisodeNodeLink]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM episode_node_links
+                WHERE episode_id = ?
+                ORDER BY created_at DESC
+                """,
+                (episode_id,),
+            ).fetchall()
+        return [self._row_to_link(r) for r in rows]
+
+    def count_episode_node_links(self) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM episode_node_links"
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    def _row_to_link(self, row: sqlite3.Row) -> EpisodeNodeLink:
+        return EpisodeNodeLink(
+            link_id=row["link_id"],
+            episode_id=row["episode_id"],
+            node_id=row["node_id"],
+            relation=row["relation"],  # type: ignore[arg-type]
+            proposal_id=row["proposal_id"],
+            report_id=row["report_id"],
+            confidence=float(row["confidence"]),
+            note=row["note"],
+            created_at=datetime.fromisoformat(row["created_at"])
+            if row["created_at"]
+            else datetime.utcnow(),
+        )
+
     def stats(self) -> Dict[str, Any]:
         return {
             "db_path": str(self.db_path.resolve()),
+            "schema_version": SCHEMA_VERSION,
             "episodes": self.count_episodes(),
             "proposals_pending": self.count_proposals("pending"),
             "proposals_total": self.count_proposals(),
             "graph_nodes": self.count_graph_nodes(),
+            "graph_edges": self.count_graph_edges(),
+            "episode_node_links": self.count_episode_node_links(),
             "reflections": len(self.list_reflection_reports(limit=100000)),
         }
