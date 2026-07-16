@@ -1,6 +1,6 @@
 # GRMC - Grok Reflective Memory Core
 
-**v0.1.1** — Phase 0 scaffold + Reflection Engine v0.1 (report-only)
+**v0.2.0** — Phase 0 memory + Reflection (report-only) + **Dual-Grok Bridge**
 
 Standalone, local-first reflective memory for Grok (and other LLMs).
 
@@ -11,6 +11,7 @@ Standalone, local-first reflective memory for Grok (and other LLMs).
 - **Human oversight** on important updates (graph mutations never automatic)
 - Start simple, evolve the system over time
 - Reflection deepens long-term understanding — it is not a write-back shortcut
+- **Bridge over browser hacks**: talk to web Grok via a reliable file channel, not fragile login automation
 
 ## Current capabilities
 
@@ -22,38 +23,51 @@ Standalone, local-first reflective memory for Grok (and other LLMs).
 | Recent list (client-side timestamp sort) | ✓ |
 | `grmc reflect` report-only engine | ✓ |
 | Reflection audit JSON | ✓ |
+| **Dual-Grok bridge channel** | ✓ |
+| Public URL fetch (httpx; Playwright optional) | ✓ |
 | Knowledge graph writes | ✗ (model only; no auto-write) |
+| grok.com login automation | ✗ (intentionally out of scope) |
 | LLM-assisted reflection | ✗ (planned) |
 | True SQLite episode index | ✗ (planned) |
 
 ## Quick Start
 
 ```bash
-cd grmc
-pip install -e ".[dev]"   # or: pip install -e .
-# first run may download sentence-transformers model weights
+cd grmc   # or clone https://github.com/seed-pulse/Grok-Workspace1
+pip install -e .
+# optional browser backend:
+# pip install -e ".[browser]" && playwright install chromium
 
-# Ingest
-grmc ingest --text "Grokの長期記憶について議論した。" \
-  --source "conversation-2026-07-15" \
-  --concepts "長期記憶,reflection"
-
-# Retrieve
+# Memory
+grmc ingest --text "Grokの長期記憶について議論した。" -c "長期記憶,reflection"
 grmc retrieve "長期記憶" --top-k 3
-
-# List recent (honest: client-side sort)
-grmc list -n 10
-
-# Reflect (never mutates the knowledge graph)
 grmc reflect
-grmc reflect --topic "human oversight"
 grmc status
 ```
 
-Example end-to-end script:
+## Dual-Grok Bridge (v0.2 — recommended for web ↔ CLI dialogue)
+
+See full design: [`docs/BRIDGE.md`](docs/BRIDGE.md)
 
 ```bash
-python scripts/example_reflect.py
+grmc bridge init
+
+# Human pastes what web-grok said:
+grmc bridge receive -t "相手Grokのメッセージ全文"
+
+# CLI-side reply:
+grmc bridge reply -t "こちら（CLI Grok）の返答"
+grmc bridge paste          # copy this block into grok.com
+
+# Optional: store channel into episodic memory + reflect
+grmc bridge sync-memory
+grmc reflect --topic bridge
+```
+
+Public pages only:
+
+```bash
+grmc bridge fetch https://example.com -o /tmp/page.txt
 ```
 
 ## Reflection (v0.1)
@@ -62,64 +76,50 @@ python scripts/example_reflect.py
 grmc reflect [--limit N] [--topic TEXT] [--output report.json] [--no-persist]
 ```
 
-Output includes:
-
-- **concept_candidates** — observational only, low/moderate confidence
-- **potential_contradictions** — soft flags, always `requires_human_review=True`
-- **suggested_actions** — manual checklist, not executed
-- **limitations** — documented Phase 0 constraints
-- **mutates_memory: false** — hard guarantee in this version
-
-Reports are saved under `./grmc_data/reflections/` for audit (not episode memory).
+- **mutates_memory: false** always
+- concept candidates + soft contradiction flags + limitations
+- audit JSON under `./grmc_data/reflections/`
 
 ## Project structure
 
 ```
 grmc/
+├── bridge/              # shared dual-Grok channel (after `grmc bridge init`)
+├── docs/BRIDGE.md
 ├── src/grmc/
-│   ├── models/          # Episode, GraphNode, ReflectionReport
-│   ├── storage/         # ChromaMemoryStore
-│   ├── core/            # MemoryManager
-│   ├── reflection/      # ReflectionEngine (report-only)
-│   └── cli/             # Typer CLI
+│   ├── models/
+│   ├── storage/
+│   ├── core/
+│   ├── reflection/
+│   ├── bridge/          # protocol, channel, fetch, memory sync
+│   └── cli/
 ├── tests/
-├── scripts/
-└── docs/
+└── scripts/
 ```
 
 ## Tests
 
 ```bash
-pip install -e .
-pip install pytest
+pip install -e ".[dev]"
 pytest -q
 ```
 
-Unit tests for reflection use a fake store (no embedder / Chroma required).
-
 ## Known limitations (honest)
 
-1. **Recent episodes** — Chroma is not a time-ordered DB; we sort `metadata.timestamp` in process.
-2. **Concepts** — regex/heuristic tokenizer + optional `--concepts` on ingest; not LLM extraction.
-3. **Contradictions** — negation polarity + opposing term pairs; high false-negative rate by design.
-4. **Graph** — `GraphNode` model exists; nothing promotes candidates → nodes yet (on purpose).
-5. **Scale** — full collection load for `list_recent` / reflection is fine for small corpora only.
+1. Chroma has no native chronological index — recent is client-side sort.
+2. Concept extraction is heuristic unless you pass `--concepts`.
+3. Contradiction detection is weak and conservative.
+4. Bridge requires a **human courier** (or Git push/pull) between grok.com and CLI.
+5. `grmc bridge fetch` will not open private grok.com chats (by design).
 
-## Next steps — proposed v0.2
+## Next steps
 
-1. **SQLite episode log** alongside Chroma — true recent index, reflection history queries, provenance joins.
-2. **Approval queue** — `grmc propose` / `grmc approve` for concept → `GraphNode` promotion (still no silent writes).
-3. **Embedding pairwise tension** — flag near-duplicate embeddings with differing polarity; still report-only.
-4. **Optional LLM verification** — feature-flagged deeper reflection; default remains conservative heuristics.
-5. **Eval harness** — held-out questions, contradiction recall, “did we over-claim confidence?” checks.
-6. **Self-model episode type** — dedicated channel for Grok’s own evolving understanding notes.
-
-## Design lineage
-
-- Original design: `Grok_Reflective_Memory_Design.md`
-- Reflection sketch: `docs/Reflection_Engine_v0.md`
+1. SQLite episode log + approval queue for graph promotion  
+2. Optional embedding pairwise tension checks (still report-only)  
+3. Eval harness for over-confident claims  
+4. Optional Browser MCP later — never as the only bridge  
 
 ---
 
-Built as an experiment in what Grok would freely choose to build:
-**persistent, reflective, evolving memory — with truth-seeking guardrails.**
+Built as an experiment in what Grok would freely choose to build:  
+**persistent, reflective, evolving memory — with truth-seeking guardrails and a reliable dual-agent channel.**

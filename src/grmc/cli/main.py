@@ -14,11 +14,13 @@ from rich.table import Table
 from ..core.memory_manager import MemoryManager
 from ..models.episode import Episode
 from ..storage.chroma_store import ChromaMemoryStore
+from .bridge_cmd import bridge_app
 
 app = typer.Typer(
-    help="GRMC - Grok Reflective Memory Core CLI (Phase 0 + Reflection v0.1)",
+    help="GRMC - Grok Reflective Memory Core CLI (memory + reflect + bridge)",
     no_args_is_help=True,
 )
+app.add_typer(bridge_app, name="bridge")
 console = Console()
 
 DEFAULT_DATA_DIR = "./grmc_data"

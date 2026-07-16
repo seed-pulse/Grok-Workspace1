@@ -1,5 +1,6 @@
 # Local memory store & reflection audits
 grmc_data/
+bridge/.synced_message_ids
 *.egg-info/
 .eggs/
 dist/

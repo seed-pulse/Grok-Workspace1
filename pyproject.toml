@@ -1,6 +1,6 @@
 [project]
 name = "grmc"
-version = "0.1.1"
+version = "0.2.0"
 description = "Grok Reflective Memory Core - Persistent & Reflective Memory System for Grok"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,15 @@ dependencies = [
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
     "numpy>=1.26.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+browser = [
+    "playwright>=1.40.0",
+]
+dev = [
+    "pytest>=8.0.0",
 ]
 
 [project.scripts]
