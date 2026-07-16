@@ -1,4 +1,4 @@
-"""GRMC CLI — memory, reflect, propose/approve, bridge."""
+"""GRMC CLI — memory, reflect, propose/approve, graph, ops, bridge."""
 
 from __future__ import annotations
 
@@ -20,8 +20,13 @@ from .graph_cmd import graph_app
 from .ops_cmd import ops_app
 
 app = typer.Typer(
-    help="GRMC - Grok Reflective Memory Core (think via reflect, write via approve)",
+    help=(
+        "GRMC — Grok Reflective Memory Core.\n\n"
+        "Loop: ingest → reflect (think) → propose → approve (write) → inspect.\n"
+        "Reflection never writes the knowledge graph; only approve does."
+    ),
     no_args_is_help=True,
+    rich_markup_mode="rich",
 )
 app.add_typer(bridge_app, name="bridge")
 app.add_typer(edges_app, name="edges")
@@ -45,23 +50,18 @@ def _sqlite(data_dir: str = DEFAULT_DATA_DIR) -> SQLiteStore:
 
 @app.command()
 def ingest(
-    text: str = typer.Option(..., "--text", "-t", help="Content to ingest as memory"),
-    source: str = typer.Option("cli", "--source", "-s", help="Source of this memory"),
-    conversation_id: Optional[str] = typer.Option(None, "--conv", help="Conversation ID"),
+    text: str = typer.Option(..., "--text", "-t", help="Content to store as an episode"),
+    source: str = typer.Option("cli", "--source", "-s", help="Origin label"),
+    conversation_id: Optional[str] = typer.Option(None, "--conv", help="Conversation id"),
     concepts: Optional[str] = typer.Option(
-        None,
-        "--concepts",
-        "-c",
-        help="Comma-separated concept labels to attach (optional)",
+        None, "--concepts", "-c", help="Comma-separated concept labels"
     ),
-    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir", help="Storage directory"),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir", help="Data directory"),
     embedder: str = typer.Option(
-        "auto",
-        "--embedder",
-        help="Embedding backend: auto | sentence-transformers | hashing",
+        "auto", "--embedder", help="auto | sentence-transformers | hashing"
     ),
 ):
-    """Ingest a new episode (SQLite SoR + Chroma vector)."""
+    """Store a new episode (SQLite system-of-record + Chroma vector)."""
     manager = _manager(data_dir, embedder=embedder)
     extracted = [p.strip() for p in concepts.split(",")] if concepts else []
 
@@ -82,16 +82,12 @@ def ingest(
 
 @app.command()
 def retrieve(
-    query: str = typer.Argument(..., help="What to search for in memory"),
-    top_k: int = typer.Option(5, "--top-k", "-k", help="Number of results"),
-    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir", help="Storage directory"),
-    embedder: str = typer.Option(
-        "auto",
-        "--embedder",
-        help="Embedding backend: auto | sentence-transformers | hashing",
-    ),
+    query: str = typer.Argument(..., help="Search query"),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="Max results"),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+    embedder: str = typer.Option("auto", "--embedder"),
 ):
-    """Retrieve relevant memories using semantic search (Chroma)."""
+    """Semantic search over episodes (Chroma vectors)."""
     manager = _manager(data_dir, embedder=embedder)
     results = manager.retrieve(query, top_k=top_k)
 
@@ -99,10 +95,10 @@ def retrieve(
         console.print("[yellow]No relevant memories found.[/yellow]")
         return
 
-    table = Table(title=f"Top {len(results)} Memories for: {query}")
+    table = Table(title=f"Top {len(results)} for: {query}")
     table.add_column("Episode ID", style="cyan")
-    table.add_column("Summary", style="white")
-    table.add_column("Score", style="green")
+    table.add_column("Summary")
+    table.add_column("Score", style="green", justify="right")
 
     for r in results:
         summary = r.get("summary") or r.get("content_summary") or ""
@@ -117,21 +113,21 @@ def retrieve(
 
 @app.command("list")
 def list_cmd(
-    limit: int = typer.Option(10, "--limit", "-n", help="Max episodes to show"),
-    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir", help="Storage directory"),
+    limit: int = typer.Option(10, "--limit", "-n", help="Max rows"),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
 ):
-    """List recent episodes from SQLite (timestamp index)."""
+    """List recent episodes (SQLite timestamp index)."""
     episodes = _sqlite(data_dir).list_recent(limit=limit)
 
     if not episodes:
         console.print("[yellow]No episodes stored yet.[/yellow]")
         return
 
-    table = Table(title=f"Recent episodes (SQLite, up to {limit})")
+    table = Table(title=f"Recent episodes (up to {limit})")
     table.add_column("Episode ID", style="cyan")
     table.add_column("Timestamp", style="dim")
     table.add_column("Source", style="magenta")
-    table.add_column("Summary", style="white")
+    table.add_column("Summary")
 
     for ep in episodes:
         summary = ep.get("summary") or ""
@@ -139,137 +135,144 @@ def list_cmd(
             summary = summary[:70] + "..."
         table.add_row(
             ep.get("episode_id", ""),
-            str(ep.get("timestamp") or (ep.get("metadata") or {}).get("timestamp", "")),
-            str(ep.get("source") or (ep.get("metadata") or {}).get("source", "")),
+            str(ep.get("timestamp") or "")[:19],
+            str(ep.get("source") or ""),
             summary,
         )
 
     console.print(table)
-    console.print("[dim]Source of truth: SQLite episodes table (indexed by timestamp).[/dim]")
+    console.print("[dim]SoR: SQLite episodes (not Chroma ordering).[/dim]")
 
 
 @app.command()
 def status(
-    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir", help="Storage directory"),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
 ):
-    """Show SQLite stats, pending proposals, and last reflection."""
+    """Dashboard: counts, last reflection, pending queue, LLM audit snapshot."""
+    data_path = Path(data_dir).resolve()
     db = _sqlite(data_dir)
     stats = db.stats()
-    console.print("[bold]GRMC Memory Status[/bold]")
-    console.print(f"Storage: {Path(data_dir).resolve()}")
-    console.print(f"SQLite:  {stats['db_path']}")
-    console.print(f"Episodes: [cyan]{stats['episodes']}[/cyan]")
+
+    # Pending breakdown
+    pending = db.list_proposals(status="pending", limit=500)
+    n_concept = sum(1 for p in pending if p.kind in ("concept_candidate", "manual"))
+    n_edge = sum(1 for p in pending if p.kind == "edge")
+
     console.print(
-        f"Proposals: pending=[yellow]{stats['proposals_pending']}[/yellow] "
-        f"total={stats['proposals_total']}"
-    )
-    console.print(
-        f"Graph nodes: [cyan]{stats['graph_nodes']}[/cyan]  "
-        f"edges: [cyan]{stats.get('graph_edges', 0)}[/cyan]  "
-        f"provenance links: [cyan]{stats.get('episode_node_links', 0)}[/cyan]"
-    )
-    console.print(
-        f"Reflection reports (SQLite): {stats['reflections']}  "
-        f"schema_v={stats.get('schema_version', '?')}"
+        Panel.fit(
+            f"[bold]GRMC v0.8[/bold]  ·  think ≠ write  ·  approve-only graph\n"
+            f"data: [cyan]{data_path}[/cyan]\n"
+            f"sqlite: {stats['db_path']}",
+            title="Status",
+            border_style="cyan",
+        )
     )
 
-    try:
-        from ..core.embedder import create_embedder
+    counts = Table(title="Memory & graph", show_header=True)
+    counts.add_column("Metric")
+    counts.add_column("Value", justify="right", style="cyan")
+    counts.add_row("Episodes", str(stats.get("episodes", 0)))
+    counts.add_row("Graph nodes", str(stats.get("graph_nodes", 0)))
+    counts.add_row("Graph edges", str(stats.get("graph_edges", 0)))
+    counts.add_row("Provenance links", str(stats.get("episode_node_links", 0)))
+    counts.add_row("Reflection reports", str(stats.get("reflections", 0)))
+    counts.add_row("Schema version", str(stats.get("schema_version", "?")))
+    console.print(counts)
 
-        emb = create_embedder("hashing")  # avoid broken torch on status
-        console.print(f"Embedder probe (hashing): [cyan]{emb.name}[/cyan]")
-    except Exception as exc:  # pragma: no cover
-        console.print(f"[yellow]Embedder probe failed: {exc}[/yellow]")
+    prop_table = Table(title="Approval queue", show_header=True)
+    prop_table.add_column("State")
+    prop_table.add_column("Count", justify="right")
+    prop_table.add_row("Pending (all)", str(stats.get("proposals_pending", 0)))
+    prop_table.add_row("  · concepts/manual", str(n_concept))
+    prop_table.add_row("  · edges", str(n_edge))
+    prop_table.add_row("Total proposals ever", str(stats.get("proposals_total", 0)))
+    console.print(prop_table)
+
+    if pending:
+        preview = Table(title="Pending preview (up to 5)")
+        preview.add_column("ID", style="yellow")
+        preview.add_column("Kind")
+        preview.add_column("Label")
+        preview.add_column("Conf", justify="right")
+        for p in pending[:5]:
+            preview.add_row(
+                p.proposal_id,
+                p.kind,
+                p.label[:40],
+                f"{p.confidence:.2f}",
+            )
+        console.print(preview)
+        console.print("[dim]Next: grmc propose  ·  grmc approve <id>  ·  grmc reject <id>[/dim]")
 
     latest = db.latest_reflection()
     if latest:
-        console.print("[bold]Last reflection (SQLite)[/bold]")
-        console.print(f"  report_id: {latest.get('report_id')}")
-        console.print(f"  timestamp: {latest.get('timestamp')}")
-        console.print(f"  mode: {latest.get('mode')}  episodes: {latest.get('episodes_analyzed')}")
+        mm = bool(latest.get("mutates_memory"))
+        mm_style = "red" if mm else "green"
         console.print(
-            f"  mutates_memory: {bool(latest.get('mutates_memory'))} "
-            "[dim](should always be false)[/dim]"
+            Panel.fit(
+                f"report_id: [cyan]{latest.get('report_id')}[/cyan]\n"
+                f"timestamp: {latest.get('timestamp')}\n"
+                f"mode: {latest.get('mode')}  episodes_analyzed: {latest.get('episodes_analyzed')}\n"
+                f"mutates_memory: [{mm_style}]{mm}[/{mm_style}] "
+                f"[dim](must be False)[/dim]",
+                title="Last reflection",
+                border_style="green" if not mm else "red",
+            )
         )
     else:
-        file_latest = Path(data_dir) / "reflections" / "latest.json"
-        if file_latest.exists():
-            try:
-                info = json.loads(file_latest.read_text(encoding="utf-8"))
-                console.print("[bold]Last reflection (file pointer)[/bold]")
-                console.print(f"  report_id: {info.get('report_id')}")
-            except (json.JSONDecodeError, OSError):
-                pass
-        else:
-            console.print("[dim]No reflection reports yet. Run: grmc reflect[/dim]")
+        console.print("[dim]No reflections yet — run: grmc reflect[/dim]")
 
-    if stats["proposals_pending"]:
-        console.print(
-            f"[dim]Review proposals: grmc propose  "
-            f"({stats['proposals_pending']} pending)[/dim]"
-        )
-
+    # LLM audit
     try:
         from ..llm.audit import LLMAuditLog
 
         llm_sum = LLMAuditLog(data_dir).summary()
         console.print(
-            f"LLM audit: calls={llm_sum['calls']}  "
-            f"tokens_est={llm_sum['total_tokens_est']}  "
-            f"(see `grmc ops llm-log`)"
+            Panel.fit(
+                f"calls={llm_sum['calls']}  success={llm_sum['success']}  "
+                f"failed={llm_sum['failed']}\n"
+                f"total_tokens_est={llm_sum['total_tokens_est']}  "
+                f"by_purpose={llm_sum['by_purpose'] or '{}'}\n"
+                f"[dim]{llm_sum['path']}[/dim]\n"
+                f"[dim]LLM default OFF — enable with GRMC_LLM=1 or reflect --llm[/dim]",
+                title="LLM audit",
+                border_style="dim",
+            )
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        console.print(f"[dim]LLM audit unavailable: {exc}[/dim]")
+
+    console.print(
+        "[dim]Docs: docs/QUICKSTART.md · docs/DESIGN_PRINCIPLES.md · docs/HANDOVER.md[/dim]"
+    )
 
 
 @app.command()
 def reflect(
     recent: bool = typer.Option(
-        False,
-        "--recent",
-        help="Analyze recent episodes (default when --topic omitted).",
+        False, "--recent", help="Recent mode (default when --topic omitted)"
     ),
-    limit: int = typer.Option(
-        30,
-        "--limit",
-        "-n",
-        help="Max recent episodes (SQLite; ignored if --topic)",
-    ),
-    topic: Optional[str] = typer.Option(
-        None,
-        "--topic",
-        "-t",
-        help="Topic mode: semantic retrieve via Chroma",
-    ),
-    output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Also write full report JSON"
-    ),
-    no_persist: bool = typer.Option(
-        False, "--no-persist", help="Skip JSON file audit under reflections/"
-    ),
+    limit: int = typer.Option(30, "--limit", "-n", help="Max recent episodes"),
+    topic: Optional[str] = typer.Option(None, "--topic", "-t", help="Semantic topic mode"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write report JSON"),
+    no_persist: bool = typer.Option(False, "--no-persist", help="Skip reflections/ JSON file"),
     no_propose: bool = typer.Option(
-        False,
-        "--no-propose",
-        help="Do not enqueue concept candidates as pending proposals",
+        False, "--no-propose", help="Do not enqueue concept proposals"
     ),
     no_edge_propose: bool = typer.Option(
-        False,
-        "--no-edge-propose",
-        help="Do not enqueue soft edge suggestions as pending edge proposals",
+        False, "--no-edge-propose", help="Do not enqueue soft edge proposals"
     ),
     llm: Optional[bool] = typer.Option(
         None,
         "--llm/--no-llm",
-        help="LLM verification: --llm on, --no-llm off, omit=env GRMC_LLM (default off)",
+        help="LLM verification: --llm on · --no-llm off · omit=env (default off)",
     ),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
     embedder: str = typer.Option("auto", "--embedder"),
 ):
-    """Reflect (think only). Optionally enqueue proposals — never writes graph."""
+    """Think only: build a reflection report. Never writes the knowledge graph."""
     if recent and topic:
-        console.print(
-            "[yellow]Both --recent and --topic given; using topic mode.[/yellow]"
-        )
+        console.print("[yellow]Both --recent and --topic: using topic mode.[/yellow]")
 
     manager = _manager(data_dir, embedder=embedder)
 
@@ -296,7 +299,8 @@ def reflect(
         Panel.fit(
             f"[bold]{report.report_id}[/bold]\n"
             f"mode={report.mode}  episodes={report.episodes_analyzed}  "
-            f"confidence={report.confidence_level}  mutates_memory={report.mutates_memory}\n"
+            f"confidence={report.confidence_level}  "
+            f"mutates_memory=[green]{report.mutates_memory}[/green]\n"
             f"embedder={embedder_name}  llm={llm_state}  "
             f"concept_proposals={enqueued}  edge_proposals={edge_enq}",
             title=title,
@@ -305,7 +309,7 @@ def reflect(
     )
 
     if report.concept_candidates:
-        table = Table(title="Concept candidates → pending proposals (if enqueued)")
+        table = Table(title="Concept candidates (not graph nodes yet)")
         table.add_column("Label", style="cyan")
         table.add_column("Freq", justify="right")
         table.add_column("Conf", justify="right", style="green")
@@ -329,7 +333,7 @@ def reflect(
                 f"  {i}. [{method}] conf={flag.confidence:.2f}{sim_s}  "
                 f"{flag.episode_id_a} ↔ {flag.episode_id_b}"
             )
-            console.print(f"     reason: {flag.reason}")
+            console.print(f"     {flag.reason}")
     else:
         console.print(
             "\n[dim]No contradiction heuristic fired (not proof of consistency).[/dim]"
@@ -367,7 +371,7 @@ def reflect(
     if enqueued or edge_enq:
         console.print(
             f"[green]✓[/green] Enqueued concept={enqueued} edge={edge_enq}. "
-            "Next: [bold]grmc propose[/bold] / [bold]grmc propose --kind edge[/bold]"
+            "Next: [bold]grmc propose[/bold]"
         )
 
     if output:
@@ -378,42 +382,36 @@ def reflect(
 @app.command()
 def propose(
     status: str = typer.Option(
-        "pending",
-        "--status",
-        "-s",
-        help="Filter: pending | approved | rejected | all",
+        "pending", "--status", "-s", help="pending | approved | rejected | all"
     ),
     kind: Optional[str] = typer.Option(
-        None,
-        "--kind",
-        "-k",
-        help="Filter: concept_candidate | manual | edge",
+        None, "--kind", "-k", help="concept_candidate | manual | edge"
     ),
     limit: int = typer.Option(50, "--limit", "-n"),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
     label: Optional[str] = typer.Option(
-        None,
-        "--add",
-        help="Manually add a pending concept proposal with this label (no graph write)",
+        None, "--add", help="Manually queue a concept label (still needs approve)"
     ),
 ):
-    """List approval-queue proposals, or manually add one with --add."""
+    """List the approval queue, or add a manual concept proposal."""
     manager = _manager(data_dir, embedder="hashing")
 
     if label:
         created = manager.approval.enqueue_many_labels([label], source="manual")
         if created:
-            console.print(f"[green]✓[/green] Pending proposal: {created[0].proposal_id} ({label})")
+            console.print(
+                f"[green]✓[/green] Pending: {created[0].proposal_id} ({label})"
+            )
         else:
             console.print(
-                f"[yellow]Skipped (already pending or graph node exists): {label}[/yellow]"
+                f"[yellow]Skipped (already pending or node exists): {label}[/yellow]"
             )
 
     filter_status = None if status == "all" else status
     items = manager.approval.list(status=filter_status, limit=limit, kind=kind)
     if not items:
         console.print(
-            f"[dim]No proposals with status={status!r}"
+            f"[dim]No proposals status={status!r}"
             + (f" kind={kind!r}" if kind else "")
             + ".[/dim]"
         )
@@ -437,37 +435,29 @@ def propose(
         )
     console.print(table)
     console.print(
-        "[dim]Approve writes graph: grmc approve <id>  ·  Reject: grmc reject <id>[/dim]"
+        "[dim]Write graph: grmc approve <id>  ·  Dismiss: grmc reject <id>[/dim]"
     )
 
 
 @app.command()
 def approve(
     proposal_id: str = typer.Argument(..., help="Proposal id (prop_...)"),
-    note: Optional[str] = typer.Option(None, "--note", help="Optional review note"),
+    note: Optional[str] = typer.Option(None, "--note", help="Review note"),
     confidence_cap: Optional[float] = typer.Option(
-        None,
-        "--cap",
-        help="Max confidence (default 0.55 nodes / 0.45 edges)",
+        None, "--cap", help="Max conf (default 0.55 node / 0.45 edge)"
     ),
     node_type: str = typer.Option(
         "concept",
         "--type",
-        help="Graph node type: concept | belief | fact | user_model | self_model",
+        help="Node type if concept: concept|belief|fact|user_model|self_model",
     ),
     link_to: Optional[str] = typer.Option(
-        None,
-        "--link-to",
-        help="After node approve, enqueue a *pending* related_to edge to this node id",
+        None, "--link-to", help="Also enqueue pending related edge to this node"
     ),
-    link_type: str = typer.Option(
-        "related_to",
-        "--link-type",
-        help="Edge type used with --link-to",
-    ),
+    link_type: str = typer.Option("related_to", "--link-type"),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
 ):
-    """Approve a pending proposal → write GraphNode or GraphEdge (+ provenance)."""
+    """Human gate: write GraphNode or GraphEdge (+ provenance). Only write path."""
     manager = _manager(data_dir, embedder="hashing")
     try:
         result = manager.approval.approve(
@@ -491,7 +481,7 @@ def approve(
                 f"{edge.source_node_id} -[{edge.edge_type}]-> {edge.target_node_id}\n"
                 f"confidence={edge.confidence:.2f}\n"
                 f"episodes={len(edge.supporting_episode_ids)}",
-                title="GraphEdge written (human approved)",
+                title="GraphEdge written (approved)",
                 border_style="green",
             )
         )
@@ -503,26 +493,26 @@ def approve(
         Panel.fit(
             f"[bold]{node.node_id}[/bold]\n"
             f"label={node.label}\n"
-            f"type={node.type}  confidence={node.confidence:.2f}  version={node.version}\n"
+            f"type={node.type}  confidence={node.confidence:.2f}  v{node.version}\n"
             f"supporting_episodes={len(node.supporting_episodes)}  "
-            f"provenance_links_written={n_links}",
-            title="GraphNode written (human approved)",
+            f"provenance_links={n_links}",
+            title="GraphNode written (approved)",
             border_style="green",
         )
     )
     related = result.get("related_edge_proposal")
     if related:
         console.print(
-            f"[yellow]Pending edge proposal enqueued:[/yellow] {related.proposal_id}\n"
+            f"[yellow]Pending edge proposal:[/yellow] {related.proposal_id}\n"
             f"  {related.label}\n"
-            f"  Approve with: grmc approve {related.proposal_id}"
+            f"  Approve: grmc approve {related.proposal_id}"
         )
 
 
 @app.command()
 def reject(
-    proposal_id: str = typer.Argument(..., help="Proposal id (prop_...)"),
-    note: Optional[str] = typer.Option(None, "--note", help="Optional reason"),
+    proposal_id: str = typer.Argument(..., help="Proposal id"),
+    note: Optional[str] = typer.Option(None, "--note"),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
 ):
     """Reject a pending proposal (no graph write)."""
@@ -540,7 +530,7 @@ def nodes_cmd(
     limit: int = typer.Option(50, "--limit", "-n"),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
 ):
-    """List approved GraphNodes (written only via approve)."""
+    """List approved GraphNodes."""
     items = _sqlite(data_dir).list_graph_nodes(limit=limit)
     if not items:
         console.print("[dim]No graph nodes yet. Approve a proposal first.[/dim]")
@@ -562,35 +552,22 @@ def nodes_cmd(
             str(len(n.supporting_episodes)),
         )
     console.print(table)
-    console.print("[dim]Detail: grmc node <id> --with-edges[/dim]")
+    console.print("[dim]Detail: grmc node <id> --provenance[/dim]")
 
 
 @app.command("node")
 def node_cmd(
     node_id: str = typer.Argument(..., help="Node id (node_...)"),
-    with_edges: bool = typer.Option(
-        True,
-        "--with-edges/--no-edges",
-        help="Show incident edges",
-    ),
+    with_edges: bool = typer.Option(True, "--with-edges/--no-edges"),
     with_provenance: bool = typer.Option(
-        True,
-        "--with-provenance/--no-provenance",
-        help="Show episode↔node provenance links",
+        True, "--with-provenance/--no-provenance", help="Show episode links"
     ),
     provenance: bool = typer.Option(
-        False,
-        "--provenance",
-        help="Alias to force-show provenance (same as --with-provenance)",
+        False, "--provenance", help="Force-show provenance"
     ),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
 ):
-    """Show one GraphNode with optional edges and provenance ('why this node?').
-
-    Examples:
-      grmc node node_abc --provenance
-      grmc node node_abc --with-edges --with-provenance
-    """
+    """Show one node with edges and provenance (why does this exist?)."""
     show_provenance = with_provenance or provenance
     db = _sqlite(data_dir)
     node = db.get_graph_node(node_id)
@@ -603,8 +580,7 @@ def node_cmd(
             f"[bold]{node.node_id}[/bold]\n"
             f"label={node.label}\n"
             f"type={node.type}  confidence={node.confidence:.2f}  version={node.version}\n"
-            f"supporting_episodes={node.supporting_episodes}\n"
-            f"metadata={node.metadata}",
+            f"supporting_episodes={node.supporting_episodes}",
             title="GraphNode",
             border_style="cyan",
         )
@@ -613,15 +589,14 @@ def node_cmd(
     if show_provenance:
         links = db.list_links_for_node(node_id)
         if not links:
-            console.print("[dim]No provenance links recorded for this node.[/dim]")
+            console.print("[dim]No provenance links for this node.[/dim]")
         else:
             table = Table(title="Provenance (episode → node)")
             table.add_column("Link ID", style="cyan")
             table.add_column("Episode")
             table.add_column("Relation")
             table.add_column("Conf", justify="right")
-            table.add_column("Proposal")
-            table.add_column("Episode summary")
+            table.add_column("Summary")
             for link in links:
                 ep = db.get_episode(link.episode_id)
                 summary = (ep.get("summary") if ep else "") or ""
@@ -632,7 +607,6 @@ def node_cmd(
                     link.episode_id,
                     link.relation,
                     f"{link.confidence:.2f}",
-                    (link.proposal_id or "")[:14],
                     summary,
                 )
             console.print(table)
@@ -644,7 +618,7 @@ def node_cmd(
         else:
             table = Table(title="Incident edges")
             table.add_column("Edge ID", style="cyan")
-            table.add_column("Direction")
+            table.add_column("Dir")
             table.add_column("Type")
             table.add_column("Other")
             table.add_column("Conf", justify="right")

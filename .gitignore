@@ -1,5 +1,6 @@
-# Local memory store & reflection audits
+# Local memory store & reflection / LLM audits
 grmc_data/
+**/llm_audit/
 bridge/.synced_message_ids
 *.egg-info/
 .eggs/

@@ -14,7 +14,10 @@ from ..models.graph_edge import EDGE_TYPES
 from ..storage.sqlite_store import SQLiteStore
 
 edges_app = typer.Typer(
-    help="Graph edges (node↔node). Writes only via approve on edge proposals.",
+    help=(
+        "Graph edges (node↔node). "
+        "`propose` only queues; `grmc approve` is the write gate."
+    ),
     no_args_is_help=True,
 )
 console = Console()

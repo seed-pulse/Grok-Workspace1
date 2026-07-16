@@ -75,7 +75,8 @@ class GraphPath:
             return self.node_ids[0] if self.node_ids else ""
         parts = [self.steps[0].from_label or self.steps[0].from_node_id]
         for s in self.steps:
-            arrow = f" -[{s.edge_type}/{s.direction}]-> "
+            # Clear ASCII path: A --[related_to]--> B
+            arrow = f" --[{s.edge_type}]--> "
             parts.append(arrow + (s.to_label or s.to_node_id))
         return "".join(parts)
 

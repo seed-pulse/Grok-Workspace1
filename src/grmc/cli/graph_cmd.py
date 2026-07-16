@@ -15,7 +15,7 @@ from ..core.graph_query import find_paths, neighborhood
 from ..storage.sqlite_store import SQLiteStore
 
 graph_app = typer.Typer(
-    help="Read-only graph queries (no writes).",
+    help="Read-only graph navigation: neighbors and path (never writes).",
     no_args_is_help=True,
 )
 console = Console()
@@ -162,43 +162,62 @@ def path_cmd(
     )
 
     if not result.found:
-        console.print("[yellow]No path within depth limit.[/yellow]")
+        console.print(
+            "[yellow]No path within depth limit.[/yellow] "
+            "[dim]Try higher --depth (max 3) or remove --type filter.[/dim]"
+        )
     else:
         for i, path in enumerate(result.paths, 1):
-            console.print(f"\n[bold]Path {i}[/bold] (length={path.length})")
-            console.print(f"  {path.describe()}")
+            console.print(
+                Panel(
+                    f"[bold]{path.describe()}[/bold]\n"
+                    f"hops={path.length}  nodes: {' → '.join(path.node_ids)}",
+                    title=f"Path {i}",
+                    border_style="green",
+                )
+            )
             if path.steps:
-                table = Table(show_header=True, title=f"Steps (path {i})")
-                table.add_column("#", justify="right")
+                table = Table(show_header=True, box=None, pad_edge=False)
+                table.add_column("#", justify="right", style="dim")
                 table.add_column("From")
-                table.add_column("Type")
-                table.add_column("Dir")
+                table.add_column("Edge")
+                table.add_column("Dir", style="dim")
                 table.add_column("To")
-                table.add_column("EConf", justify="right")
+                table.add_column("Conf", justify="right")
                 for j, s in enumerate(path.steps, 1):
                     table.add_row(
                         str(j),
-                        (s.from_label or s.from_node_id)[:24],
+                        (s.from_label or s.from_node_id)[:28],
                         s.edge_type,
                         s.direction,
-                        (s.to_label or s.to_node_id)[:24],
+                        (s.to_label or s.to_node_id)[:28],
                         f"{s.edge_confidence:.2f}",
                     )
                 console.print(table)
 
     if result.provenance:
-        console.print("\n[bold]Provenance on path nodes[/bold]")
+        ptable = Table(title="Provenance on path nodes")
+        ptable.add_column("Node")
+        ptable.add_column("Episode", style="cyan")
+        ptable.add_column("Rel")
+        ptable.add_column("Conf", justify="right")
+        ptable.add_column("Summary")
         for nid, links in result.provenance.items():
             node = db.get_graph_node(nid)
-            label = node.label if node else nid
+            label = (node.label if node else nid)[:20]
             if not links:
-                console.print(f"  [dim]{label}: (no episode links)[/dim]")
+                ptable.add_row(label, "—", "—", "—", "(no links)")
                 continue
             for link in links[:3]:
-                console.print(
-                    f"  {label}: {link['episode_id']} [{link['relation']}] "
-                    f"conf={link['confidence']:.2f} — {(link.get('summary') or '')[:40]}"
+                ptable.add_row(
+                    label,
+                    link["episode_id"],
+                    link["relation"],
+                    f"{link['confidence']:.2f}",
+                    (link.get("summary") or "")[:42],
                 )
+                label = ""  # only show node name on first row
+        console.print(ptable)
 
     if json_out:
         json_out.write_text(

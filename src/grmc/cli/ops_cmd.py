@@ -17,12 +17,17 @@ from ..llm.audit import LLMAuditLog
 from ..storage.legacy_migrate import migrate_chroma_to_sqlite
 from ..storage.sqlite_store import SQLiteStore
 
-ops_help = "Eval, export, LLM audit, migration (read-mostly; migrate additive)."
 console = Console()
 
 DEFAULT_DATA = "./grmc_data"
 
-ops_app = typer.Typer(help=ops_help, no_args_is_help=True)
+ops_app = typer.Typer(
+    help=(
+        "Operations: eval health, export/dump overview, LLM audit log, "
+        "legacy migrate (additive). No silent graph writes."
+    ),
+    no_args_is_help=True,
+)
 
 
 @ops_app.command("eval")

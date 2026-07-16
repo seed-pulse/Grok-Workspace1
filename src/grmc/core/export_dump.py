@@ -16,15 +16,18 @@ def build_dump(sqlite: SQLiteStore, *, recent_episodes: int = 20) -> Dict[str, A
     pending = sqlite.list_proposals(status="pending", limit=50)
     reflections = sqlite.list_reflection_reports(limit=10)
 
+    label_by_id = {n.node_id: n.label for n in nodes}
+
     return {
         "generated_at": datetime.utcnow().isoformat(),
+        "version_note": "GRMC dump — read-only overview; graph writes require approve",
         "stats": stats,
         "recent_episodes": [
             {
                 "episode_id": e["episode_id"],
                 "timestamp": e.get("timestamp"),
                 "source": e.get("source"),
-                "summary": (e.get("summary") or "")[:200],
+                "summary": (e.get("summary") or "")[:240],
                 "concepts": e.get("extracted_concepts") or [],
             }
             for e in episodes
@@ -36,6 +39,7 @@ def build_dump(sqlite: SQLiteStore, *, recent_episodes: int = 20) -> Dict[str, A
                 "type": n.type,
                 "confidence": n.confidence,
                 "supporting_episodes": n.supporting_episodes,
+                "provenance_link_count": len(sqlite.list_links_for_node(n.node_id)),
             }
             for n in nodes
         ],
@@ -45,6 +49,8 @@ def build_dump(sqlite: SQLiteStore, *, recent_episodes: int = 20) -> Dict[str, A
                 "type": e.edge_type,
                 "source": e.source_node_id,
                 "target": e.target_node_id,
+                "source_label": label_by_id.get(e.source_node_id, e.source_node_id),
+                "target_label": label_by_id.get(e.target_node_id, e.target_node_id),
                 "confidence": e.confidence,
             }
             for e in edges
@@ -55,6 +61,7 @@ def build_dump(sqlite: SQLiteStore, *, recent_episodes: int = 20) -> Dict[str, A
                 "kind": p.kind,
                 "label": p.label,
                 "confidence": p.confidence,
+                "source": p.source,
             }
             for p in pending
         ],
@@ -64,58 +71,96 @@ def build_dump(sqlite: SQLiteStore, *, recent_episodes: int = 20) -> Dict[str, A
 
 def dump_markdown(sqlite: SQLiteStore, *, recent_episodes: int = 15) -> str:
     data = build_dump(sqlite, recent_episodes=recent_episodes)
+    st = data["stats"]
     lines: List[str] = []
     lines.append("# GRMC Memory Dump")
     lines.append("")
-    lines.append(f"_Generated: {data['generated_at']}_")
+    lines.append(f"_Generated: `{data['generated_at']}`_")
     lines.append("")
-    st = data["stats"]
-    lines.append("## Stats")
-    lines.append(
-        f"- episodes: **{st.get('episodes')}** · nodes: **{st.get('graph_nodes')}** · "
-        f"edges: **{st.get('graph_edges')}** · provenance links: **{st.get('episode_node_links')}**"
-    )
-    lines.append(
-        f"- pending proposals: **{st.get('proposals_pending')}** · "
-        f"reflections: **{st.get('reflections')}**"
-    )
+    lines.append("> Read-only snapshot. Reflection never writes the graph; ")
+    lines.append("> only `grmc approve` creates nodes/edges.")
     lines.append("")
+    lines.append("## Snapshot")
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|------:|")
+    lines.append(f"| Episodes | {st.get('episodes', 0)} |")
+    lines.append(f"| Graph nodes | {st.get('graph_nodes', 0)} |")
+    lines.append(f"| Graph edges | {st.get('graph_edges', 0)} |")
+    lines.append(f"| Provenance links | {st.get('episode_node_links', 0)} |")
+    lines.append(f"| Pending proposals | {st.get('proposals_pending', 0)} |")
+    lines.append(f"| Reflection reports | {st.get('reflections', 0)} |")
+    lines.append(f"| Schema | v{st.get('schema_version', '?')} |")
+    lines.append("")
+
     lines.append("## Recent episodes")
+    lines.append("")
+    if not data["recent_episodes"]:
+        lines.append("_None — try `grmc ingest -t \"...\"`._")
     for e in data["recent_episodes"]:
+        concepts = ", ".join(e.get("concepts") or []) or "—"
         lines.append(
-            f"- `{e['episode_id']}` ({e.get('timestamp', '')[:19]}) "
-            f"— {e['summary']}"
+            f"- **`{e['episode_id']}`** · {str(e.get('timestamp') or '')[:19]} · "
+            f"`{e.get('source')}`  \n"
+            f"  {e['summary']}  \n"
+            f"  _concepts:_ {concepts}"
         )
     lines.append("")
+
     lines.append("## Graph nodes")
+    lines.append("")
     if not data["graph_nodes"]:
-        lines.append("_None yet — approve concept proposals first._")
+        lines.append("_None — run reflect, then `grmc approve` on a concept proposal._")
     for n in data["graph_nodes"]:
         lines.append(
-            f"- `{n['node_id']}` **{n['label']}** "
-            f"(type={n['type']}, conf={n['confidence']:.2f}, "
-            f"eps={len(n['supporting_episodes'])})"
+            f"- **{n['label']}** (`{n['node_id']}`)  \n"
+            f"  type=`{n['type']}` · conf=`{n['confidence']:.2f}` · "
+            f"support_eps={len(n['supporting_episodes'])} · "
+            f"provenance_links={n.get('provenance_link_count', 0)}"
         )
     lines.append("")
+
     lines.append("## Graph edges")
+    lines.append("")
     if not data["graph_edges"]:
-        lines.append("_None yet — approve edge proposals first._")
+        lines.append("_None — `grmc edges propose` then `approve`._")
     for e in data["graph_edges"]:
         lines.append(
-            f"- `{e['edge_id']}` {e['source']} -[{e['type']}]-> {e['target']} "
-            f"(conf={e['confidence']:.2f})"
+            f"- **{e['source_label']}** `-[{e['type']}]->` **{e['target_label']}**  \n"
+            f"  `{e['edge_id']}` · conf=`{e['confidence']:.2f}` · "
+            f"`{e['source']}` → `{e['target']}`"
         )
     lines.append("")
+
     lines.append("## Pending proposals")
+    lines.append("")
     if not data["pending_proposals"]:
         lines.append("_Queue empty._")
-    for p in data["pending_proposals"]:
-        lines.append(
-            f"- `{p['proposal_id']}` [{p['kind']}] {p['label']} "
-            f"(conf={p['confidence']:.2f})"
-        )
+    else:
+        for p in data["pending_proposals"]:
+            lines.append(
+                f"- `{p['proposal_id']}` · **{p['kind']}** · {p['label']} · "
+                f"conf=`{p['confidence']:.2f}` · src=`{p.get('source', '')}`"
+            )
+        lines.append("")
+        lines.append("_Review with `grmc propose` then approve/reject._")
     lines.append("")
+
+    if data.get("recent_reflections"):
+        lines.append("## Recent reflections")
+        lines.append("")
+        for r in data["recent_reflections"][:5]:
+            lines.append(
+                f"- `{r.get('report_id')}` · {str(r.get('timestamp') or '')[:19]} · "
+                f"mode={r.get('mode')} · episodes={r.get('episodes_analyzed')} · "
+                f"mutates={bool(r.get('mutates_memory'))}"
+            )
+        lines.append("")
+
     lines.append("---")
-    lines.append("_Dump is read-only. Graph writes require `grmc approve`._")
+    lines.append("")
+    lines.append(
+        "_Docs: `docs/QUICKSTART.md` · `docs/DESIGN_PRINCIPLES.md` · `docs/HANDOVER.md`_"
+    )
     lines.append("")
     return "\n".join(lines)

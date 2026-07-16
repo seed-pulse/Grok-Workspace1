@@ -17,7 +17,10 @@ from ..bridge.protocol import Party
 from ..core.memory_manager import MemoryManager
 
 bridge_app = typer.Typer(
-    help="Dual-Grok bridge (file channel + public fetch). No login automation.",
+    help=(
+        "Dual-Grok file bridge (human courier). "
+        "Not a grok.com login bot — see docs/BRIDGE.md."
+    ),
     no_args_is_help=True,
 )
 console = Console()

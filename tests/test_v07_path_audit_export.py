@@ -101,8 +101,22 @@ def test_export_markdown(tmp_path: Path):
     db.add_episode(
         Episode(episode_id="ep_x", content_summary="Hello memory world", source="t")
     )
-    db.add_graph_node(GraphNode(label="hello", confidence=0.4, supporting_episodes=["ep_x"]))
+    node = GraphNode(label="hello", confidence=0.4, supporting_episodes=["ep_x"])
+    other = GraphNode(label="world", confidence=0.35)
+    db.add_graph_node(node)
+    db.add_graph_node(other)
+    db.add_graph_edge(
+        GraphEdge(
+            source_node_id=node.node_id,
+            target_node_id=other.node_id,
+            edge_type="related_to",
+            confidence=0.25,
+        )
+    )
     md = dump_markdown(db)
     assert "GRMC Memory Dump" in md
     assert "ep_x" in md
     assert "hello" in md
+    assert "related_to" in md
+    assert "Snapshot" in md
+    assert "approve" in md.lower()
