@@ -209,6 +209,18 @@ def status(
             f"({stats['proposals_pending']} pending)[/dim]"
         )
 
+    try:
+        from ..llm.audit import LLMAuditLog
+
+        llm_sum = LLMAuditLog(data_dir).summary()
+        console.print(
+            f"LLM audit: calls={llm_sum['calls']}  "
+            f"tokens_est={llm_sum['total_tokens_est']}  "
+            f"(see `grmc ops llm-log`)"
+        )
+    except Exception:
+        pass
+
 
 @app.command()
 def reflect(

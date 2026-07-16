@@ -7,6 +7,7 @@ Failures fall back to heuristic results unchanged (plus a note).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..models.reflection_report import (
@@ -14,6 +15,7 @@ from ..models.reflection_report import (
     ContradictionFlag,
     ReflectionReport,
 )
+from .audit import LLMAuditLog, TimedLLMCall
 from .client import LLMClient, LLMError, MockLLMClient, build_client
 from .config import LLMConfig
 
@@ -23,11 +25,19 @@ class LLMVerifier:
         self,
         config: Optional[LLMConfig] = None,
         client: Optional[LLMClient] = None,
+        audit: Optional[LLMAuditLog] = None,
+        data_dir: Optional[str | Path] = None,
     ):
         self.config = config or LLMConfig.from_env()
         self.client = client or (
             build_client(self.config) if self.config.enabled else MockLLMClient()
         )
+        if audit is not None:
+            self.audit = audit
+        elif data_dir is not None:
+            self.audit = LLMAuditLog(data_dir)
+        else:
+            self.audit = None
 
     @property
     def enabled(self) -> bool:
@@ -49,11 +59,17 @@ class LLMVerifier:
             "model": self.config.model,
             "concept_conf_cap": self.config.concept_conf_cap,
             "contradiction_conf_cap": self.config.contradiction_conf_cap,
+            "audit": str(self.audit.path) if self.audit else None,
         }
+        call_ids: List[str] = []
 
         # 1) Concept enrichment
         try:
-            concepts = self._extract_concepts(episodes)
+            concepts, call_id = self._extract_concepts(
+                episodes, report_id=report.report_id
+            )
+            if call_id:
+                call_ids.append(call_id)
             if concepts:
                 report.concept_candidates = self._merge_concepts(
                     report.concept_candidates, concepts
@@ -70,9 +86,13 @@ class LLMVerifier:
         # 2) Contradiction verification / scoring
         try:
             if report.potential_contradictions:
-                verified = self._verify_contradictions(
-                    report.potential_contradictions, episodes
+                verified, call_id = self._verify_contradictions(
+                    report.potential_contradictions,
+                    episodes,
+                    report_id=report.report_id,
                 )
+                if call_id:
+                    call_ids.append(call_id)
                 report.potential_contradictions = verified
                 report.notes.append(
                     "LLM contradiction review applied (still low-confidence; "
@@ -85,6 +105,7 @@ class LLMVerifier:
             )
             report.metadata.setdefault("llm", {})["contradiction_error"] = str(exc)
 
+        report.metadata["llm"]["call_ids"] = call_ids
         report.mutates_memory = False  # hard invariant
         report.metadata["llm"]["mutates_memory"] = False
         return report
@@ -97,9 +118,46 @@ class LLMVerifier:
             lines.append(f"- {eid}: {summary}")
         return "\n".join(lines)
 
+    def _call_json(
+        self,
+        *,
+        purpose: str,
+        system: str,
+        user: str,
+        temperature: float,
+        report_id: Optional[str],
+    ) -> tuple[Dict[str, Any], str]:
+        with TimedLLMCall(
+            self.audit,
+            purpose=purpose,
+            model=self.config.model,
+            provider=self.config.provider,
+            report_id=report_id,
+        ) as timed:
+            try:
+                data = self.client.complete_json(
+                    system, user, temperature=temperature
+                )
+                usage = getattr(self.client, "last_usage", None) or {}
+                raw = getattr(self.client, "last_raw_content", "") or json.dumps(data)
+                timed.mark_success(
+                    prompt=system + "\n" + user,
+                    completion=raw if isinstance(raw, str) else json.dumps(raw),
+                    prompt_tokens=usage.get("prompt_tokens"),
+                    completion_tokens=usage.get("completion_tokens"),
+                )
+                timed.record.metadata["purpose_detail"] = purpose
+                return data, timed.record.call_id
+            except Exception:
+                # TimedLLMCall.__exit__ records failure
+                raise
+
     def _extract_concepts(
-        self, episodes: Sequence[Dict[str, Any]]
-    ) -> List[ConceptCandidate]:
+        self,
+        episodes: Sequence[Dict[str, Any]],
+        *,
+        report_id: Optional[str] = None,
+    ) -> tuple[List[ConceptCandidate], Optional[str]]:
         system = (
             "You extract conservative concept labels for a long-term AI memory system. "
             "Return JSON only: {\"concepts\": [{\"label\": str, \"confidence\": float, "
@@ -113,11 +171,17 @@ class LLMVerifier:
             + self._episode_blob(episodes)
             + "\n\nExtract up to 12 high-signal concepts."
         )
-        data = self.client.complete_json(system, user, temperature=0.1)
+        data, call_id = self._call_json(
+            purpose="concept_extract",
+            system=system,
+            user=user,
+            temperature=0.1,
+            report_id=report_id,
+        )
         raw = data.get("concepts") or []
         out: List[ConceptCandidate] = []
         if not isinstance(raw, list):
-            return out
+            return out, call_id
         for item in raw[:12]:
             if not isinstance(item, dict):
                 continue
@@ -141,7 +205,7 @@ class LLMVerifier:
                     source="llm",
                 )
             )
-        return out
+        return out, call_id
 
     def _merge_concepts(
         self,
@@ -155,7 +219,6 @@ class LLMVerifier:
             key = c.label.lower()
             if key in by_label:
                 old = by_label[key]
-                # Prefer slightly higher conf but still capped; union episodes
                 eps = list(
                     dict.fromkeys(old.supporting_episode_ids + c.supporting_episode_ids)
                 )
@@ -182,7 +245,9 @@ class LLMVerifier:
         self,
         flags: List[ContradictionFlag],
         episodes: Sequence[Dict[str, Any]],
-    ) -> List[ContradictionFlag]:
+        *,
+        report_id: Optional[str] = None,
+    ) -> tuple[List[ContradictionFlag], Optional[str]]:
         system = (
             "You review soft contradiction flags for an AI memory system. "
             "Return JSON only: {\"items\": [{\"index\": int, \"keep\": bool, "
@@ -208,14 +273,22 @@ class LLMVerifier:
             {"flags": payload, "context_episodes": self._episode_blob(episodes, 8)},
             ensure_ascii=False,
         )
-        data = self.client.complete_json(system, user, temperature=0.0)
+        data, call_id = self._call_json(
+            purpose="contradiction_review",
+            system=system,
+            user=user,
+            temperature=0.0,
+            report_id=report_id,
+        )
         items = data.get("items") or []
         if not isinstance(items, list) or not items:
-            # No useful review — keep originals with cap
-            return [
-                self._cap_flag(f, f.confidence, f.reason + " [llm:no-op]")
-                for f in flags
-            ]
+            return (
+                [
+                    self._cap_flag(f, f.confidence, f.reason + " [llm:no-op]")
+                    for f in flags
+                ],
+                call_id,
+            )
 
         by_idx: Dict[int, Dict[str, Any]] = {}
         for it in items:
@@ -247,7 +320,7 @@ class LLMVerifier:
                     method=f"{f.method}+llm",
                 )
             )
-        return out
+        return out, call_id
 
     def _cap_flag(
         self,

@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from ..core.graph_query import neighborhood
+from ..core.graph_query import find_paths, neighborhood
 from ..storage.sqlite_store import SQLiteStore
 
 graph_app = typer.Typer(
@@ -105,6 +105,100 @@ def neighbors_cmd(
                 (p.get("summary") or "")[:50],
             )
         console.print(ptable)
+
+    if json_out:
+        json_out.write_text(
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        console.print(f"[green]✓[/green] wrote {json_out}")
+
+
+@graph_app.command("path")
+def path_cmd(
+    node_a: str = typer.Argument(..., help="Source node id"),
+    node_b: str = typer.Argument(..., help="Target node id"),
+    max_depth: int = typer.Option(
+        3, "--depth", "-d", min=1, max=3, help="Max hop length (1–3)"
+    ),
+    edge_type: Optional[str] = typer.Option(
+        None, "--type", help="Filter edge type along the path"
+    ),
+    max_paths: int = typer.Option(
+        3, "--max-paths", "-k", min=1, max=10, help="Max shortest paths to show"
+    ),
+    no_provenance: bool = typer.Option(
+        False, "--no-provenance", help="Skip per-node provenance on path"
+    ),
+    json_out: Optional[Path] = typer.Option(None, "--json", "-o"),
+    data_dir: str = typer.Option(DEFAULT_DATA, "--data-dir"),
+):
+    """Find shortest path(s) between two nodes (max 3 hops). Read-only."""
+    db = _db(data_dir)
+    try:
+        result = find_paths(
+            db,
+            node_a,
+            node_b,
+            max_depth=max_depth,
+            edge_type=edge_type,
+            max_paths=max_paths,
+            include_provenance=not no_provenance,
+        )
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        Panel.fit(
+            f"[bold]{result.source.label}[/bold] ({result.source.node_id})\n"
+            f"    →  [bold]{result.target.label}[/bold] ({result.target.node_id})\n"
+            f"found={result.found}  max_depth={result.max_depth}  "
+            f"paths={len(result.paths)}"
+            + (f"  filter={edge_type}" if edge_type else ""),
+            title="Graph path (read-only)",
+            border_style="green" if result.found else "yellow",
+        )
+    )
+
+    if not result.found:
+        console.print("[yellow]No path within depth limit.[/yellow]")
+    else:
+        for i, path in enumerate(result.paths, 1):
+            console.print(f"\n[bold]Path {i}[/bold] (length={path.length})")
+            console.print(f"  {path.describe()}")
+            if path.steps:
+                table = Table(show_header=True, title=f"Steps (path {i})")
+                table.add_column("#", justify="right")
+                table.add_column("From")
+                table.add_column("Type")
+                table.add_column("Dir")
+                table.add_column("To")
+                table.add_column("EConf", justify="right")
+                for j, s in enumerate(path.steps, 1):
+                    table.add_row(
+                        str(j),
+                        (s.from_label or s.from_node_id)[:24],
+                        s.edge_type,
+                        s.direction,
+                        (s.to_label or s.to_node_id)[:24],
+                        f"{s.edge_confidence:.2f}",
+                    )
+                console.print(table)
+
+    if result.provenance:
+        console.print("\n[bold]Provenance on path nodes[/bold]")
+        for nid, links in result.provenance.items():
+            node = db.get_graph_node(nid)
+            label = node.label if node else nid
+            if not links:
+                console.print(f"  [dim]{label}: (no episode links)[/dim]")
+                continue
+            for link in links[:3]:
+                console.print(
+                    f"  {label}: {link['episode_id']} [{link['relation']}] "
+                    f"conf={link['confidence']:.2f} — {(link.get('summary') or '')[:40]}"
+                )
 
     if json_out:
         json_out.write_text(

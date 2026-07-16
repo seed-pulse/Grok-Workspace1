@@ -1,45 +1,35 @@
 # GRMC - Grok Reflective Memory Core
 
-**v0.6.0** — Optional LLM verification (default off) · graph neighborhood · edges/provenance · approval · eval
+**v0.7.0** — Graph path · LLM audit log · export/dump · optional LLM · neighborhood · edges/provenance
 
 ## Philosophy
 
-- Prefer missing a signal over wrong high-confidence beliefs
-- Reflection **never** writes the graph (`mutates_memory=False`)
-- Graph writes only via human `approve`
-- LLM assist is **opt-in** and report-only
+- Prefer missing a signal over wrong high-confidence beliefs  
+- Reflection never writes the graph (`mutates_memory=False`)  
+- Graph writes only via human `approve`  
+- LLM assist is opt-in (default **OFF**) and fully audited when used  
 
-## Quick start
+## Commands (highlights)
 
 ```bash
-pip install -e .
-grmc ingest -t "..." -c "human_oversight" --embedder hashing
-grmc reflect --embedder hashing          # heuristics only
-grmc reflect --llm                       # optional LLM (needs API key)
+# Think
+grmc reflect --embedder hashing
+grmc reflect --llm                 # needs API key; logged
+
+# Write (human only)
 grmc propose / grmc approve prop_...
-grmc node node_... --provenance
-grmc graph neighbors node_... --depth 2
+
+# Read graph
+grmc graph neighbors node_a --depth 2
+grmc graph path node_a node_b --depth 3
+grmc node node_a --provenance
+
+# Ops
 grmc ops eval
-```
-
-## LLM (default OFF)
-
-```bash
-export GRMC_LLM=1
-export GRMC_LLM_API_KEY=sk-...
-export GRMC_LLM_BASE_URL=https://api.x.ai/v1
-export GRMC_LLM_MODEL=grok-2-latest
-grmc reflect --llm
-```
-
-See `docs/LLM_VERIFICATION.md`.
-
-## Graph neighborhood
-
-```bash
-grmc graph neighbors node_abc --depth 1
-grmc graph neighbors node_abc --depth 2 --type supports
-grmc graph neighbors node_abc -o /tmp/nb.json
+grmc ops llm-log
+grmc ops export --format md -o dump.md
+grmc ops dump
+grmc ops migrate-legacy
 ```
 
 ## Safety caps
@@ -52,6 +42,12 @@ grmc graph neighbors node_abc -o /tmp/nb.json
 | LLM concept | 0.50 |
 | LLM contradiction | 0.35 |
 
+## Docs
+
+- `docs/LLM_VERIFICATION.md`
+- `docs/EDGES_AND_PROVENANCE.md`
+- `docs/V07_NOTES.md`
+
 ## Tests
 
 ```bash
@@ -60,4 +56,4 @@ pytest -q
 
 ---
 
-**Conservative · Reflective · Provenance-aware · Human-gated · LLM-optional.**
+**Conservative · Reflective · Provenance-aware · Human-gated · LLM-optional & audited.**

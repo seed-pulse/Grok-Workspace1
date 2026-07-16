@@ -15,6 +15,9 @@ class LLMError(RuntimeError):
 
 
 class LLMClient:
+    last_usage: Optional[Dict[str, Any]] = None
+    last_raw_content: str = ""
+
     def complete_json(
         self, system: str, user: str, *, temperature: float = 0.1
     ) -> Dict[str, Any]:
@@ -27,29 +30,43 @@ class MockLLMClient(LLMClient):
     def __init__(self, canned: Optional[Dict[str, Any]] = None):
         self.canned = canned or {}
         self.calls: List[Dict[str, str]] = []
+        self.last_usage = None
+        self.last_raw_content = ""
 
     def complete_json(
         self, system: str, user: str, *, temperature: float = 0.1
     ) -> Dict[str, Any]:
         self.calls.append({"system": system, "user": user})
         if self.canned:
-            return dict(self.canned)
-        # Heuristic-ish mock: echo request kind
-        if "contradiction" in system.lower() or "contradiction" in user.lower():
-            return {
-                "verified": [],
-                "rejected": [],
+            result = dict(self.canned)
+        elif "contradiction" in system.lower() or "contradiction" in user.lower():
+            result = {
+                "items": [],
                 "notes": "mock: no verification applied",
             }
-        return {
-            "concepts": [],
-            "notes": "mock: no concepts extracted",
+        else:
+            result = {
+                "concepts": [],
+                "notes": "mock: no concepts extracted",
+            }
+        self.last_raw_content = json.dumps(result)
+        # Fake small usage for audit tests
+        self.last_usage = {
+            "prompt_tokens": max(1, len(system + user) // 4),
+            "completion_tokens": max(1, len(self.last_raw_content) // 4),
+            "total_tokens": 0,
         }
+        self.last_usage["total_tokens"] = (
+            self.last_usage["prompt_tokens"] + self.last_usage["completion_tokens"]
+        )
+        return result
 
 
 class OpenAICompatibleClient(LLMClient):
     def __init__(self, config: LLMConfig):
         self.config = config
+        self.last_usage = None
+        self.last_raw_content = ""
 
     def complete_json(
         self, system: str, user: str, *, temperature: float = 0.1
@@ -70,7 +87,6 @@ class OpenAICompatibleClient(LLMClient):
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            # Best-effort JSON mode for providers that support it
             "response_format": {"type": "json_object"},
         }
         try:
@@ -86,8 +102,9 @@ class OpenAICompatibleClient(LLMClient):
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"Unexpected LLM response shape: {data!r}") from exc
 
+        self.last_usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
         text = (content or "").strip()
-        # Strip markdown fences if present
+        self.last_raw_content = text
         if text.startswith("```"):
             text = text.strip("`")
             if text.startswith("json"):

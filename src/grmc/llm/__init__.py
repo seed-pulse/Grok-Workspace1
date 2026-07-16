@@ -3,7 +3,14 @@
 Default: fully disabled. Enable via env ``GRMC_LLM=1`` or CLI ``--llm``.
 """
 
+from .audit import LLMAuditLog, LLMCallRecord
 from .config import LLMConfig, llm_enabled_from_env
 from .verification import LLMVerifier
 
-__all__ = ["LLMConfig", "LLMVerifier", "llm_enabled_from_env"]
+__all__ = [
+    "LLMConfig",
+    "LLMVerifier",
+    "LLMAuditLog",
+    "LLMCallRecord",
+    "llm_enabled_from_env",
+]

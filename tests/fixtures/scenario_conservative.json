@@ -1,0 +1,26 @@
+{
+  "name": "conservative_memory_basics",
+  "description": "Fixed episodes for eval/fixture demos — no auto graph writes",
+  "episodes": [
+    {
+      "episode_id": "fx_ep_001",
+      "summary": "Human oversight is essential for long-term memory safety.",
+      "concepts": ["human_oversight", "long_term_memory"]
+    },
+    {
+      "episode_id": "fx_ep_002",
+      "summary": "Human oversight prevents wrong high-confidence beliefs in AI memory.",
+      "concepts": ["human_oversight", "confidence"]
+    },
+    {
+      "episode_id": "fx_ep_003",
+      "summary": "Long-term memory is not essential if context windows grow forever.",
+      "concepts": ["long_term_memory", "context_window"]
+    },
+    {
+      "episode_id": "fx_ep_004",
+      "summary": "Reflection must stay report-only until a human approves graph writes.",
+      "concepts": ["reflection", "approval"]
+    }
+  ]
+}

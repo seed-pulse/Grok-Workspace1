@@ -271,7 +271,9 @@ class ReflectionEngine:
                 from ..llm.verification import LLMVerifier
 
                 cfg = LLMConfig.from_env(force_enabled=True)
-                verifier = LLMVerifier(config=cfg)
+                # Audit under data_dir/reflections parent when possible
+                data_dir = self.report_dir.parent
+                verifier = LLMVerifier(config=cfg, data_dir=data_dir)
             return verifier.enrich_report(report, episodes)
         except Exception as exc:
             report.notes.append(
