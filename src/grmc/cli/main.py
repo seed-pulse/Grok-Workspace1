@@ -173,7 +173,7 @@ def status(
             console.print(f"  path: {info.get('path')}")
             console.print(
                 f"  mutates_memory: {info.get('mutates_memory')} "
-                "[dim](always false in v0.1)[/dim]"
+                "[dim](always false — report-only)[/dim]"
             )
         except (json.JSONDecodeError, OSError) as exc:
             console.print(f"[yellow]Could not read last reflection: {exc}[/yellow]")
@@ -183,14 +183,22 @@ def status(
 
 @app.command()
 def reflect(
+    recent: bool = typer.Option(
+        False,
+        "--recent",
+        help="Analyze recent episodes (default mode when --topic is omitted).",
+    ),
     limit: int = typer.Option(
-        30, "--limit", "-n", help="Max recent episodes to analyze (ignored if --topic)"
+        30,
+        "--limit",
+        "-n",
+        help="Max recent episodes to analyze (recent mode; ignored if --topic)",
     ),
     topic: Optional[str] = typer.Option(
         None,
         "--topic",
         "-t",
-        help="Optional topic: reflect on semantically related episodes",
+        help="Topic mode: reflect on semantically related episodes",
     ),
     output: Optional[Path] = typer.Option(
         None,
@@ -212,15 +220,26 @@ def reflect(
 ):
     """Run a conservative reflection pass (report only — never mutates the graph).
 
+    Modes:
+      grmc reflect
+      grmc reflect --recent -n 20
+      grmc reflect --topic "長期記憶"
+
     Produces concept candidates, soft contradiction flags, and suggested actions
     for human review. Knowledge graph is not written by this command.
     """
+    if recent and topic:
+        console.print(
+            "[yellow]Both --recent and --topic given; using topic mode "
+            "(semantic retrieve).[/yellow]"
+        )
+
     manager = _manager(data_dir, embedder=embedder)
 
     with console.status("[bold]Reflecting (report-only)...[/bold]"):
         report = manager.reflect(
             recent_limit=limit,
-            topic=topic,
+            topic=topic,  # None → recent mode inside engine
             persist=not no_persist,
         )
 
