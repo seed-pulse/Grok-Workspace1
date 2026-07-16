@@ -1,10 +1,7 @@
-"""ChromaDB-backed episode store (Phase 0 / early Phase 1).
+"""ChromaDB vector store — embeddings only.
 
-Honest limitations of this layer:
-- Chroma is optimized for vector search, not chronological listing.
-- ``list_recent`` / ``get_all_episodes`` fetch candidates then sort client-side
-  by the ``timestamp`` metadata field we write on ingest.
-- Metadata values must be scalar (str/int/float/bool); lists are serialized.
+Chronological listing and system-of-record fields live in SQLite
+(``sqlite_store.SQLiteStore``). This module must not be treated as SoR.
 """
 
 from __future__ import annotations
@@ -31,9 +28,9 @@ def _deserialize_concepts(raw: Any) -> List[str]:
 
 
 class ChromaMemoryStore:
-    """Local persistent store for episode embeddings + metadata."""
+    """Local persistent vector index for episode embeddings."""
 
-    def __init__(self, persist_directory: str = "./grmc_data"):
+    def __init__(self, persist_directory: str = "./grmc_data/chroma"):
         self.persist_dir = Path(persist_directory)
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
@@ -47,27 +44,34 @@ class ChromaMemoryStore:
         )
 
     def add_episode(self, episode: Episode, embedding: List[float]) -> str:
-        """Add an episode with its embedding."""
+        """Index an episode embedding (idempotent replace if id exists)."""
+        meta = {
+            "timestamp": episode.timestamp.isoformat(),
+            "source": episode.source,
+            "conversation_id": episode.conversation_id or "",
+            "importance_score": float(episode.importance_score),
+            "extracted_concepts": _serialize_concepts(episode.extracted_concepts),
+        }
+        # upsert-like: delete then add for re-ingest safety
+        try:
+            existing = self.collection.get(ids=[episode.episode_id])
+            if existing and existing.get("ids"):
+                self.collection.delete(ids=[episode.episode_id])
+        except Exception:
+            pass
+
         self.collection.add(
             ids=[episode.episode_id],
             embeddings=[embedding],
             documents=[episode.content_summary],
-            metadatas=[
-                {
-                    "timestamp": episode.timestamp.isoformat(),
-                    "source": episode.source,
-                    "conversation_id": episode.conversation_id or "",
-                    "importance_score": float(episode.importance_score),
-                    "extracted_concepts": _serialize_concepts(episode.extracted_concepts),
-                }
-            ],
+            metadatas=[meta],
         )
         return episode.episode_id
 
     def query(
         self, query_embedding: List[float], top_k: int = 5
     ) -> List[Dict[str, Any]]:
-        """Semantic search for relevant episodes."""
+        """Semantic search for relevant episode ids + summaries."""
         if self.count() == 0:
             return []
 
@@ -100,54 +104,7 @@ class ChromaMemoryStore:
     def count(self) -> int:
         return self.collection.count()
 
-    def get_all_episodes(self) -> List[Dict[str, Any]]:
-        """Return all stored episodes (unsorted). Used as base for list_recent."""
-        total = self.count()
-        if total == 0:
-            return []
-
-        results = self.collection.get(include=["documents", "metadatas"])
-        episodes: List[Dict[str, Any]] = []
-        ids = results.get("ids") or []
-        documents = results.get("documents") or []
-        metadatas = results.get("metadatas") or []
-
-        for i, episode_id in enumerate(ids):
-            meta = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
-            doc = documents[i] if i < len(documents) else ""
-            episodes.append(
-                {
-                    "episode_id": episode_id,
-                    "summary": doc or "",
-                    "metadata": meta,
-                    "extracted_concepts": _deserialize_concepts(
-                        meta.get("extracted_concepts")
-                    ),
-                }
-            )
-        return episodes
-
-    def list_recent(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Return episodes sorted by timestamp descending (client-side).
-
-        Phase 0 honesty: Chroma has no native chronological index. We load
-        stored metadata and sort by the ISO timestamp written at ingest.
-        Episodes without a parseable timestamp sort last.
-        """
-        episodes = self.get_all_episodes()
-        if not episodes:
-            return []
-
-        def sort_key(ep: Dict[str, Any]) -> str:
-            meta = ep.get("metadata") or {}
-            ts = meta.get("timestamp") or ""
-            return str(ts)
-
-        episodes.sort(key=sort_key, reverse=True)
-        return episodes[: max(0, limit)]
-
     def get_episode(self, episode_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch a single episode by id, or None if missing."""
         results = self.collection.get(
             ids=[episode_id],
             include=["documents", "metadatas"],

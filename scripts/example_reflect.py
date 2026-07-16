@@ -1,10 +1,9 @@
-"""Example workflow: ingest sample episodes → run reflection → print report."""
+"""Example: ingest → reflect → list proposals → approve one."""
 
 from pathlib import Path
 
 from grmc.core.memory_manager import MemoryManager
 from grmc.models.episode import Episode
-from grmc.storage.chroma_store import ChromaMemoryStore
 
 DATA = Path("./grmc_data")
 
@@ -33,12 +32,10 @@ samples = [
 
 
 def main() -> None:
-    store = ChromaMemoryStore(persist_directory=str(DATA))
-    # auto falls back to hashing embedder if sentence-transformers/torch is broken
-    manager = MemoryManager(store, embedder_prefer="auto")
+    manager = MemoryManager.from_data_dir(DATA, embedder_prefer="auto")
     print(f"Embedder: {manager.embedder.name}")
+    print(f"Current SQLite episodes: {manager.count_episodes()}")
 
-    print(f"Current episode count: {store.count()}")
     for text, concepts in samples:
         ep = Episode(
             content_summary=text,
@@ -49,20 +46,23 @@ def main() -> None:
         eid = manager.ingest_episode(ep)
         print(f"  ingested {eid}")
 
-    print("\n--- Running reflection (report-only) ---")
-    report = manager.reflect(recent_limit=50, persist=True)
+    print("\n--- Reflect (think only; enqueue proposals) ---")
+    report = manager.reflect(recent_limit=50, persist=True, enqueue_proposals=True)
     print(f"report_id: {report.report_id}")
-    print(f"episodes_analyzed: {report.episodes_analyzed}")
     print(f"mutates_memory: {report.mutates_memory}")
-    print(f"concept_candidates: {len(report.concept_candidates)}")
-    for c in report.concept_candidates[:8]:
-        print(f"  - {c.label} (freq={c.frequency}, conf={c.confidence:.2f}, {c.source})")
-    print(f"potential_contradictions: {len(report.potential_contradictions)}")
-    for flag in report.potential_contradictions[:5]:
-        print(f"  - {flag.reason[:100]}")
-    if report.metadata.get("report_path"):
-        print(f"\nSaved: {report.metadata['report_path']}")
-    print("\nDone. Try: grmc reflect --topic '長期記憶'")
+    print(f"proposals_enqueued: {report.metadata.get('proposals_enqueued')}")
+
+    pending = manager.approval.list(status="pending")
+    print(f"\nPending proposals: {len(pending)}")
+    for p in pending[:5]:
+        print(f"  {p.proposal_id}  {p.label}  conf={p.confidence:.2f}")
+
+    if pending:
+        print("\n--- Approve first proposal (first graph write) ---")
+        node = manager.approval.approve(pending[0].proposal_id, note="example approve")
+        print(f"GraphNode: {node.node_id} label={node.label} conf={node.confidence:.2f}")
+
+    print("\nDone. Try: grmc propose && grmc nodes")
 
 
 if __name__ == "__main__":

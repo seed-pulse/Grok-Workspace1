@@ -1,4 +1,4 @@
-"""GRMC CLI — ingest, retrieve, list, status, reflect."""
+"""GRMC CLI — memory, reflect, propose/approve, bridge."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from rich.table import Table
 
 from ..core.memory_manager import MemoryManager
 from ..models.episode import Episode
-from ..storage.chroma_store import ChromaMemoryStore
+from ..storage.sqlite_store import SQLiteStore
 from .bridge_cmd import bridge_app
 
 app = typer.Typer(
-    help="GRMC - Grok Reflective Memory Core CLI (memory + reflect + bridge)",
+    help="GRMC - Grok Reflective Memory Core (think via reflect, write via approve)",
     no_args_is_help=True,
 )
 app.add_typer(bridge_app, name="bridge")
@@ -30,8 +30,11 @@ def _manager(
     data_dir: str = DEFAULT_DATA_DIR,
     embedder: str = "auto",
 ) -> MemoryManager:
-    store = ChromaMemoryStore(persist_directory=data_dir)
-    return MemoryManager(store, embedder_prefer=embedder)
+    return MemoryManager.from_data_dir(data_dir, embedder_prefer=embedder)
+
+
+def _sqlite(data_dir: str = DEFAULT_DATA_DIR) -> SQLiteStore:
+    return SQLiteStore(Path(data_dir) / "grmc.db")
 
 
 @app.command()
@@ -52,7 +55,7 @@ def ingest(
         help="Embedding backend: auto | sentence-transformers | hashing",
     ),
 ):
-    """Ingest a new piece of memory (episode + embedding)."""
+    """Ingest a new episode (SQLite SoR + Chroma vector)."""
     manager = _manager(data_dir, embedder=embedder)
     extracted = [p.strip() for p in concepts.split(",")] if concepts else []
 
@@ -82,7 +85,7 @@ def retrieve(
         help="Embedding backend: auto | sentence-transformers | hashing",
     ),
 ):
-    """Retrieve relevant memories using semantic search."""
+    """Retrieve relevant memories using semantic search (Chroma)."""
     manager = _manager(data_dir, embedder=embedder)
     results = manager.retrieve(query, top_k=top_k)
 
@@ -96,10 +99,11 @@ def retrieve(
     table.add_column("Score", style="green")
 
     for r in results:
-        summary = r["summary"]
+        summary = r.get("summary") or r.get("content_summary") or ""
         if len(summary) > 80:
             summary = summary[:80] + "..."
-        score = 1 - r["distance"] if r.get("distance") is not None else 0.0
+        dist = r.get("distance")
+        score = 1 - dist if dist is not None else 0.0
         table.add_row(r["episode_id"], summary, f"{score:.3f}")
 
     console.print(table)
@@ -110,75 +114,87 @@ def list_cmd(
     limit: int = typer.Option(10, "--limit", "-n", help="Max episodes to show"),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir", help="Storage directory"),
 ):
-    """List recent episodes (sorted by metadata timestamp, client-side)."""
-    store = ChromaMemoryStore(persist_directory=data_dir)
-    episodes = store.list_recent(limit=limit)
+    """List recent episodes from SQLite (timestamp index)."""
+    episodes = _sqlite(data_dir).list_recent(limit=limit)
 
     if not episodes:
         console.print("[yellow]No episodes stored yet.[/yellow]")
         return
 
-    table = Table(title=f"Recent episodes (up to {limit})")
+    table = Table(title=f"Recent episodes (SQLite, up to {limit})")
     table.add_column("Episode ID", style="cyan")
     table.add_column("Timestamp", style="dim")
     table.add_column("Source", style="magenta")
     table.add_column("Summary", style="white")
 
     for ep in episodes:
-        meta = ep.get("metadata") or {}
         summary = ep.get("summary") or ""
         if len(summary) > 70:
             summary = summary[:70] + "..."
         table.add_row(
             ep.get("episode_id", ""),
-            str(meta.get("timestamp", "")),
-            str(meta.get("source", "")),
+            str(ep.get("timestamp") or (ep.get("metadata") or {}).get("timestamp", "")),
+            str(ep.get("source") or (ep.get("metadata") or {}).get("source", "")),
             summary,
         )
 
     console.print(table)
-    console.print(
-        "[dim]Note: ordering is client-side sort on metadata.timestamp "
-        "(Chroma has no native chronological index).[/dim]"
-    )
+    console.print("[dim]Source of truth: SQLite episodes table (indexed by timestamp).[/dim]")
 
 
 @app.command()
 def status(
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir", help="Storage directory"),
 ):
-    """Show current memory status and last reflection pointer (if any)."""
-    store = ChromaMemoryStore(persist_directory=data_dir)
-    count = store.count()
+    """Show SQLite stats, pending proposals, and last reflection."""
+    db = _sqlite(data_dir)
+    stats = db.stats()
     console.print("[bold]GRMC Memory Status[/bold]")
-    console.print(f"Total episodes stored: [cyan]{count}[/cyan]")
-    console.print(f"Storage location: {Path(data_dir).resolve()}")
-    # Prefer hashing probe for status so a broken torch install cannot block diagnostics
+    console.print(f"Storage: {Path(data_dir).resolve()}")
+    console.print(f"SQLite:  {stats['db_path']}")
+    console.print(f"Episodes: [cyan]{stats['episodes']}[/cyan]")
+    console.print(
+        f"Proposals: pending=[yellow]{stats['proposals_pending']}[/yellow] "
+        f"total={stats['proposals_total']}"
+    )
+    console.print(f"Graph nodes: [cyan]{stats['graph_nodes']}[/cyan]")
+    console.print(f"Reflection reports (SQLite): {stats['reflections']}")
+
     try:
         from ..core.embedder import create_embedder
 
-        emb = create_embedder("auto")
-        console.print(f"Embedder (auto): [cyan]{emb.name}[/cyan]")
-    except Exception as exc:  # pragma: no cover - env diagnostics only
-        console.print(f"[yellow]Embedder unavailable: {exc}[/yellow]")
+        emb = create_embedder("hashing")  # avoid broken torch on status
+        console.print(f"Embedder probe (hashing): [cyan]{emb.name}[/cyan]")
+    except Exception as exc:  # pragma: no cover
+        console.print(f"[yellow]Embedder probe failed: {exc}[/yellow]")
 
-    latest = Path(data_dir) / "reflections" / "latest.json"
-    if latest.exists():
-        try:
-            info = json.loads(latest.read_text(encoding="utf-8"))
-            console.print("[bold]Last reflection[/bold]")
-            console.print(f"  report_id: {info.get('report_id')}")
-            console.print(f"  timestamp: {info.get('timestamp')}")
-            console.print(f"  episodes_analyzed: {info.get('episodes_analyzed')}")
-            console.print(f"  path: {info.get('path')}")
-            console.print(
-                f"  mutates_memory: {info.get('mutates_memory')} "
-                "[dim](always false — report-only)[/dim]"
-            )
-        except (json.JSONDecodeError, OSError) as exc:
-            console.print(f"[yellow]Could not read last reflection: {exc}[/yellow]")
+    latest = db.latest_reflection()
+    if latest:
+        console.print("[bold]Last reflection (SQLite)[/bold]")
+        console.print(f"  report_id: {latest.get('report_id')}")
+        console.print(f"  timestamp: {latest.get('timestamp')}")
+        console.print(f"  mode: {latest.get('mode')}  episodes: {latest.get('episodes_analyzed')}")
+        console.print(
+            f"  mutates_memory: {bool(latest.get('mutates_memory'))} "
+            "[dim](should always be false)[/dim]"
+        )
     else:
-        console.print("[dim]No reflection reports yet. Run: grmc reflect[/dim]")
+        file_latest = Path(data_dir) / "reflections" / "latest.json"
+        if file_latest.exists():
+            try:
+                info = json.loads(file_latest.read_text(encoding="utf-8"))
+                console.print("[bold]Last reflection (file pointer)[/bold]")
+                console.print(f"  report_id: {info.get('report_id')}")
+            except (json.JSONDecodeError, OSError):
+                pass
+        else:
+            console.print("[dim]No reflection reports yet. Run: grmc reflect[/dim]")
+
+    if stats["proposals_pending"]:
+        console.print(
+            f"[dim]Review proposals: grmc propose  "
+            f"({stats['proposals_pending']} pending)[/dim]"
+        )
 
 
 @app.command()
@@ -186,52 +202,38 @@ def reflect(
     recent: bool = typer.Option(
         False,
         "--recent",
-        help="Analyze recent episodes (default mode when --topic is omitted).",
+        help="Analyze recent episodes (default when --topic omitted).",
     ),
     limit: int = typer.Option(
         30,
         "--limit",
         "-n",
-        help="Max recent episodes to analyze (recent mode; ignored if --topic)",
+        help="Max recent episodes (SQLite; ignored if --topic)",
     ),
     topic: Optional[str] = typer.Option(
         None,
         "--topic",
         "-t",
-        help="Topic mode: reflect on semantically related episodes",
+        help="Topic mode: semantic retrieve via Chroma",
     ),
     output: Optional[Path] = typer.Option(
-        None,
-        "--output",
-        "-o",
-        help="Also write full report JSON to this path",
+        None, "--output", "-o", help="Also write full report JSON"
     ),
     no_persist: bool = typer.Option(
+        False, "--no-persist", help="Skip JSON file audit under reflections/"
+    ),
+    no_propose: bool = typer.Option(
         False,
-        "--no-persist",
-        help="Do not write audit report under data_dir/reflections/",
+        "--no-propose",
+        help="Do not enqueue concept candidates as pending proposals",
     ),
-    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir", help="Storage directory"),
-    embedder: str = typer.Option(
-        "auto",
-        "--embedder",
-        help="Embedding backend: auto | sentence-transformers | hashing (topic mode)",
-    ),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+    embedder: str = typer.Option("auto", "--embedder"),
 ):
-    """Run a conservative reflection pass (report only — never mutates the graph).
-
-    Modes:
-      grmc reflect
-      grmc reflect --recent -n 20
-      grmc reflect --topic "長期記憶"
-
-    Produces concept candidates, soft contradiction flags, and suggested actions
-    for human review. Knowledge graph is not written by this command.
-    """
+    """Reflect (think only). Optionally enqueue proposals — never writes graph."""
     if recent and topic:
         console.print(
-            "[yellow]Both --recent and --topic given; using topic mode "
-            "(semantic retrieve).[/yellow]"
+            "[yellow]Both --recent and --topic given; using topic mode.[/yellow]"
         )
 
     manager = _manager(data_dir, embedder=embedder)
@@ -239,8 +241,9 @@ def reflect(
     with console.status("[bold]Reflecting (report-only)...[/bold]"):
         report = manager.reflect(
             recent_limit=limit,
-            topic=topic,  # None → recent mode inside engine
+            topic=topic,
             persist=not no_persist,
+            enqueue_proposals=not no_propose,
         )
 
     title = "Reflection Report (non-mutating)"
@@ -248,40 +251,34 @@ def reflect(
         title += f" — topic: {topic}"
 
     embedder_name = getattr(manager.embedder, "name", "unknown")
+    enqueued = report.metadata.get("proposals_enqueued", 0)
     console.print(
         Panel.fit(
             f"[bold]{report.report_id}[/bold]\n"
             f"mode={report.mode}  episodes={report.episodes_analyzed}  "
             f"confidence={report.confidence_level}  mutates_memory={report.mutates_memory}\n"
-            f"embedder={embedder_name}",
+            f"embedder={embedder_name}  proposals_enqueued={enqueued}",
             title=title,
             border_style="cyan",
         )
     )
 
-    # Concepts
     if report.concept_candidates:
-        table = Table(title="Concept candidates (not yet graph nodes)")
+        table = Table(title="Concept candidates → pending proposals (if enqueued)")
         table.add_column("Label", style="cyan")
         table.add_column("Freq", justify="right")
         table.add_column("Conf", justify="right", style="green")
         table.add_column("Source")
         for c in report.concept_candidates[:15]:
-            table.add_row(
-                c.label,
-                str(c.frequency),
-                f"{c.confidence:.2f}",
-                c.source,
-            )
+            table.add_row(c.label, str(c.frequency), f"{c.confidence:.2f}", c.source)
         console.print(table)
     else:
         console.print("[yellow]No concept candidates extracted.[/yellow]")
 
-    # Contradictions
     if report.potential_contradictions:
         console.print(
             f"\n[bold yellow]Potential tensions "
-            f"({len(report.potential_contradictions)}) — human review required[/bold yellow]"
+            f"({len(report.potential_contradictions)}) — human review[/bold yellow]"
         )
         for i, flag in enumerate(report.potential_contradictions[:10], 1):
             console.print(
@@ -289,15 +286,11 @@ def reflect(
                 f"{flag.episode_id_a} ↔ {flag.episode_id_b}"
             )
             console.print(f"     reason: {flag.reason}")
-            console.print(f"     A: {flag.summary_a[:100]}")
-            console.print(f"     B: {flag.summary_b[:100]}")
     else:
         console.print(
-            "\n[dim]No contradiction heuristic fired "
-            "(not proof of consistency).[/dim]"
+            "\n[dim]No contradiction heuristic fired (not proof of consistency).[/dim]"
         )
 
-    # Actions / limitations / notes
     if report.suggested_actions:
         console.print("\n[bold]Suggested actions (manual)[/bold]")
         for a in report.suggested_actions:
@@ -316,10 +309,157 @@ def reflect(
     report_path = report.metadata.get("report_path")
     if report_path:
         console.print(f"\n[green]✓[/green] Audit report: {report_path}")
+    if enqueued:
+        console.print(
+            f"[green]✓[/green] Enqueued {enqueued} proposal(s). "
+            "Next: [bold]grmc propose[/bold]"
+        )
 
     if output:
         output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
         console.print(f"[green]✓[/green] Wrote copy to: {output}")
+
+
+@app.command()
+def propose(
+    status: str = typer.Option(
+        "pending",
+        "--status",
+        "-s",
+        help="Filter: pending | approved | rejected | all",
+    ),
+    limit: int = typer.Option(50, "--limit", "-n"),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+    label: Optional[str] = typer.Option(
+        None,
+        "--add",
+        help="Manually add a pending proposal with this label (no graph write)",
+    ),
+):
+    """List approval-queue proposals, or manually add one with --add."""
+    manager = _manager(data_dir, embedder="hashing")
+
+    if label:
+        created = manager.approval.enqueue_many_labels([label], source="manual")
+        if created:
+            console.print(f"[green]✓[/green] Pending proposal: {created[0].proposal_id} ({label})")
+        else:
+            console.print(
+                f"[yellow]Skipped (already pending or graph node exists): {label}[/yellow]"
+            )
+
+    filter_status = None if status == "all" else status
+    items = manager.approval.list(status=filter_status, limit=limit)
+    if not items:
+        console.print(f"[dim]No proposals with status={status!r}.[/dim]")
+        return
+
+    table = Table(title=f"Proposals ({status})")
+    table.add_column("ID", style="cyan")
+    table.add_column("Status")
+    table.add_column("Label")
+    table.add_column("Conf", justify="right")
+    table.add_column("Source")
+    table.add_column("Report")
+    for p in items:
+        table.add_row(
+            p.proposal_id,
+            p.status,
+            p.label[:40],
+            f"{p.confidence:.2f}",
+            p.source,
+            (p.report_id or "")[:16],
+        )
+    console.print(table)
+    console.print(
+        "[dim]Approve writes graph: grmc approve <id>  ·  Reject: grmc reject <id>[/dim]"
+    )
+
+
+@app.command()
+def approve(
+    proposal_id: str = typer.Argument(..., help="Proposal id (prop_...)"),
+    note: Optional[str] = typer.Option(None, "--note", help="Optional review note"),
+    confidence_cap: float = typer.Option(
+        0.55,
+        "--cap",
+        help="Max confidence on first approval (conservative default 0.55)",
+    ),
+    node_type: str = typer.Option(
+        "concept",
+        "--type",
+        help="Graph node type: concept | belief | fact | user_model | self_model",
+    ),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+):
+    """Approve a pending proposal → create/update GraphNode (first graph write)."""
+    manager = _manager(data_dir, embedder="hashing")
+    try:
+        node = manager.approval.approve(
+            proposal_id,
+            node_type=node_type,  # type: ignore[arg-type]
+            confidence_cap=confidence_cap,
+            note=note,
+        )
+    except (KeyError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        Panel.fit(
+            f"[bold]{node.node_id}[/bold]\n"
+            f"label={node.label}\n"
+            f"type={node.type}  confidence={node.confidence:.2f}  version={node.version}\n"
+            f"supports={len(node.supporting_episodes)}",
+            title="GraphNode written (human approved)",
+            border_style="green",
+        )
+    )
+
+
+@app.command()
+def reject(
+    proposal_id: str = typer.Argument(..., help="Proposal id (prop_...)"),
+    note: Optional[str] = typer.Option(None, "--note", help="Optional reason"),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+):
+    """Reject a pending proposal (no graph write)."""
+    manager = _manager(data_dir, embedder="hashing")
+    try:
+        prop = manager.approval.reject(proposal_id, note=note)
+    except (KeyError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] Rejected {prop.proposal_id} ({prop.label})")
+
+
+@app.command("nodes")
+def nodes_cmd(
+    limit: int = typer.Option(50, "--limit", "-n"),
+    data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
+):
+    """List approved GraphNodes (written only via approve)."""
+    items = _sqlite(data_dir).list_graph_nodes(limit=limit)
+    if not items:
+        console.print("[dim]No graph nodes yet. Approve a proposal first.[/dim]")
+        return
+    table = Table(title="Graph nodes")
+    table.add_column("Node ID", style="cyan")
+    table.add_column("Type")
+    table.add_column("Label")
+    table.add_column("Conf", justify="right")
+    table.add_column("Ver", justify="right")
+    table.add_column("Supports", justify="right")
+    for n in items:
+        table.add_row(
+            n.node_id,
+            n.type,
+            n.label[:40],
+            f"{n.confidence:.2f}",
+            str(n.version),
+            str(len(n.supporting_episodes)),
+        )
+    console.print(table)
 
 
 if __name__ == "__main__":

@@ -203,7 +203,8 @@ class ReflectionEngine:
 
         report.notes.append(
             "Report-only mode: knowledge graph was not modified. "
-            "Approve any graph write through a future human-in-the-loop gate."
+            "Candidates may be enqueued as pending proposals; "
+            "only `grmc approve <id>` writes GraphNodes."
         )
         report.notes.append(
             f"Analyzed {len(episodes)} episode(s) in mode={mode!r}"
@@ -228,6 +229,9 @@ class ReflectionEngine:
     # ------------------------------------------------------------------
 
     def _recent_episodes(self, limit: int) -> List[Dict[str, Any]]:
+        # Prefer MemoryManager / SQLite (indexed timestamp). Vector store is not SoR.
+        if hasattr(self.memory_manager, "list_recent"):
+            return self.memory_manager.list_recent(limit=limit)
         if hasattr(self.store, "list_recent"):
             return self.store.list_recent(limit=limit)
         return []
@@ -404,19 +408,20 @@ class ReflectionEngine:
     ) -> None:
         report.limitations.extend(
             [
-                "ChromaDB has no native chronological index; 'recent' is "
-                "client-side sort on metadata.timestamp written at ingest.",
+                "Recent episodes come from SQLite (timestamp index). "
+                "ChromaDB is used only for semantic/topic retrieval.",
                 "Concept extraction is heuristic (regex tokenizer), not LLM-based.",
                 "Contradiction detection is weak surface heuristics at low confidence.",
                 "No knowledge graph is written by this engine (mutates_memory=False).",
-                "Embeddings are used for topic mode only when MemoryManager.retrieve "
-                "is available; pairwise contradiction does not yet use embeddings.",
+                "Graph writes require human `grmc approve` on pending proposals.",
+                "Topic mode uses vector retrieve; pairwise contradiction does not "
+                "yet use embeddings.",
             ]
         )
         if mode == "recent":
             report.limitations.append(
                 f"Requested recent_limit={requested_limit}; actual analyzed count "
-                "depends on how many episodes exist and have timestamps."
+                "depends on how many episodes exist in SQLite."
             )
 
     def _suggest_actions(self, report: ReflectionReport) -> List[str]:
@@ -435,12 +440,8 @@ class ReflectionEngine:
                 f"Consider explicit extracted_concepts on ingest for: {top}"
             )
         actions.append(
-            "Next iteration: add embedding-similarity contradiction check + optional "
+            "Next iteration: embedding-similarity contradiction check + optional "
             "LLM verification behind a feature flag (still report-only by default)."
-        )
-        actions.append(
-            "Next iteration: SQLite (or append-only log) for true recent-episode index "
-            "and reflection history queries."
         )
         return actions
 

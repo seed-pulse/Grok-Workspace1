@@ -1,100 +1,68 @@
 # GRMC - Grok Reflective Memory Core
 
-**v0.2.0** — Phase 0 memory + Reflection (report-only) + **Dual-Grok Bridge**
+**v0.3.0** — SQLite system of record + Approval Queue + Reflection (report-only) + Bridge
 
 Standalone, local-first reflective memory for Grok (and other LLMs).
 
 ## Philosophy
 
 - Prefer **missing** a memory over injecting a **wrong high-confidence** belief
-- Keep confidence **conservative** by default
-- **Human oversight** on important updates (graph mutations never automatic)
-- Start simple, evolve the system over time
-- Reflection deepens long-term understanding — it is not a write-back shortcut
-- **Bridge over browser hacks**: talk to web Grok via a reliable file channel, not fragile login automation
+- **Think** (reflection) and **write** (approval) are strictly separated
+- Graph changes only after **human `approve`**
+- Chroma = vectors only; **SQLite** = chronology, proposals, graph, history
 
-## Current capabilities
+## Architecture (v0.3)
 
-| Area | Status |
-|------|--------|
-| Episode model (Pydantic) | ✓ |
-| ChromaDB vector store + metadata | ✓ |
-| Semantic retrieve | ✓ |
-| Recent list (client-side timestamp sort) | ✓ |
-| `grmc reflect` report-only engine | ✓ |
-| Reflection audit JSON | ✓ |
-| **Dual-Grok bridge channel** | ✓ |
-| Public URL fetch (httpx; Playwright optional) | ✓ |
-| Knowledge graph writes | ✗ (model only; no auto-write) |
-| grok.com login automation | ✗ (intentionally out of scope) |
-| LLM-assisted reflection | ✗ (planned) |
-| True SQLite episode index | ✗ (planned) |
+```
+Ingest ──► SQLite episodes (SoR, timestamp index)
+       └─► Chroma embeddings (semantic search)
 
-## Quick Start
+Reflect ──► ReflectionReport (mutates_memory=False)
+        └─► pending proposals (no graph write)
+
+Approve ──► GraphNode in SQLite   ← only graph write path
+```
+
+## Quick start
 
 ```bash
-cd grmc   # or clone https://github.com/seed-pulse/Grok-Workspace1
+cd grmc
 pip install -e .
-# optional browser backend:
-# pip install -e ".[browser]" && playwright install chromium
+# or: pip install -e ".[dev]"
 
-# Memory
-grmc ingest --text "Grokの長期記憶について議論した。" -c "長期記憶,reflection"
-grmc retrieve "長期記憶" --top-k 3
-grmc reflect
+grmc ingest -t "長期記憶は continuity に重要" -c "長期記憶,continuity" --embedder hashing
+grmc list -n 5
+grmc reflect --recent -n 20 --embedder hashing
+grmc propose
+grmc approve prop_........     # first graph write
+grmc nodes
 grmc status
 ```
 
-## Dual-Grok Bridge (v0.2 — recommended for web ↔ CLI dialogue)
+## Commands
 
-See full design: [`docs/BRIDGE.md`](docs/BRIDGE.md)
+| Command | Role |
+|---------|------|
+| `grmc ingest` | Episode → SQLite + Chroma |
+| `grmc retrieve` | Semantic search (Chroma) |
+| `grmc list` | Recent episodes (SQLite index) |
+| `grmc reflect` | Think / report; enqueue proposals |
+| `grmc propose` | List or `--add` pending proposals |
+| `grmc approve <id>` | **Write** GraphNode (capped conf) |
+| `grmc reject <id>` | Dismiss proposal |
+| `grmc nodes` | List graph nodes |
+| `grmc status` | Counts + last reflection |
+| `grmc bridge *` | Dual-Grok file channel |
 
-```bash
-grmc bridge init
-
-# Human pastes what web-grok said:
-grmc bridge receive -t "相手Grokのメッセージ全文"
-
-# CLI-side reply:
-grmc bridge reply -t "こちら（CLI Grok）の返答"
-grmc bridge paste          # copy this block into grok.com
-
-# Optional: store channel into episodic memory + reflect
-grmc bridge sync-memory
-grmc reflect --topic bridge
-```
-
-Public pages only:
+## Approval examples
 
 ```bash
-grmc bridge fetch https://example.com -o /tmp/page.txt
-```
-
-## Reflection (v0.1)
-
-```
-grmc reflect [--limit N] [--topic TEXT] [--output report.json] [--no-persist]
-```
-
-- **mutates_memory: false** always
-- concept candidates + soft contradiction flags + limitations
-- audit JSON under `./grmc_data/reflections/`
-
-## Project structure
-
-```
-grmc/
-├── bridge/              # shared dual-Grok channel (after `grmc bridge init`)
-├── docs/BRIDGE.md
-├── src/grmc/
-│   ├── models/
-│   ├── storage/
-│   ├── core/
-│   ├── reflection/
-│   ├── bridge/          # protocol, channel, fetch, memory sync
-│   └── cli/
-├── tests/
-└── scripts/
+grmc reflect --embedder hashing
+grmc propose
+grmc approve prop_abc123def456 --note "looks solid"
+grmc approve prop_... --cap 0.5 --type belief
+grmc reject prop_... --note "too noisy"
+grmc propose --add "self_model_continuity"
 ```
 
 ## Tests
@@ -104,22 +72,28 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-## Known limitations (honest)
+## Docs
 
-1. Chroma has no native chronological index — recent is client-side sort.
-2. Concept extraction is heuristic unless you pass `--concepts`.
-3. Contradiction detection is weak and conservative.
-4. Bridge requires a **human courier** (or Git push/pull) between grok.com and CLI.
-5. `grmc bridge fetch` will not open private grok.com chats (by design).
+- [`docs/APPROVAL_AND_SQLITE.md`](docs/APPROVAL_AND_SQLITE.md)
+- [`docs/Reflection_Engine_v0.md`](docs/Reflection_Engine_v0.md)
+- [`docs/BRIDGE.md`](docs/BRIDGE.md)
 
-## Next steps
+## Known limitations
 
-1. SQLite episode log + approval queue for graph promotion  
-2. Optional embedding pairwise tension checks (still report-only)  
-3. Eval harness for over-confident claims  
-4. Optional Browser MCP later — never as the only bridge  
+1. Old Chroma-only data (pre-0.3 under `grmc_data/` root) is not auto-migrated to SQLite — re-ingest or migrate manually.
+2. Concept extraction remains heuristic unless `--concepts` is set.
+3. Contradiction detection is still weak / conservative.
+4. No multi-user auth; local single-operator approval.
+5. Graph edges (relations between nodes) not yet modeled.
+
+## Next ideas
+
+1. Graph **edges** + provenance links episode↔node  
+2. Embedding pairwise tension in reflection  
+3. Optional LLM verification (feature-flagged)  
+4. Eval harness for over-confidence  
+5. Migration tool from legacy Chroma-only stores  
 
 ---
 
-Built as an experiment in what Grok would freely choose to build:  
-**persistent, reflective, evolving memory — with truth-seeking guardrails and a reliable dual-agent channel.**
+Built as a long-term memory experiment: **conservative, reflective, human-gated.**

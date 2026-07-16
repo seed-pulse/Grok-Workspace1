@@ -1,11 +1,9 @@
 """Example script to ingest sample memories."""
 
-from grmc.models.episode import Episode
-from grmc.storage.chroma_store import ChromaMemoryStore
 from grmc.core.memory_manager import MemoryManager
+from grmc.models.episode import Episode
 
-store = ChromaMemoryStore(persist_directory="./grmc_data")
-manager = MemoryManager(store)
+manager = MemoryManager.from_data_dir("./grmc_data", embedder_prefer="auto")
 
 samples = [
     "Grokの長期記憶アーキテクチャについて議論した。永続的な自己認識が重要。",
@@ -18,4 +16,5 @@ for text in samples:
     ep_id = manager.ingest_episode(ep)
     print(f"Ingested: {ep_id}")
 
-print("\nDone. Try: grmc retrieve '長期記憶'")
+print(f"\nSQLite episodes: {manager.count_episodes()}")
+print("Done. Try: grmc list && grmc retrieve '長期記憶'")

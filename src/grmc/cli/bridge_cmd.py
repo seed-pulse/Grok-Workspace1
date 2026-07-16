@@ -15,7 +15,6 @@ from ..bridge.fetch import fetch_url
 from ..bridge.memory_sync import sync_channel_to_memory
 from ..bridge.protocol import Party
 from ..core.memory_manager import MemoryManager
-from ..storage.chroma_store import ChromaMemoryStore
 
 bridge_app = typer.Typer(
     help="Dual-Grok bridge (file channel + public fetch). No login automation.",
@@ -215,8 +214,7 @@ def bridge_sync_memory(
     """Ingest bridge messages into GRMC episodic memory (no graph mutation)."""
     ch = _channel(bridge_dir)
     ch.init()
-    store = ChromaMemoryStore(persist_directory=data_dir)
-    manager = MemoryManager(store, embedder_prefer=embedder)
+    manager = MemoryManager.from_data_dir(data_dir, embedder_prefer=embedder)
     result = sync_channel_to_memory(ch, manager, only_new=not all_messages)
     console.print(
         f"[green]✓[/green] ingested={len(result['ingested_episodes'])} "
