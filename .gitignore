@@ -1,0 +1,13 @@
+# Local memory store & reflection audits
+grmc_data/
+*.egg-info/
+.eggs/
+dist/
+build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+.DS_Store

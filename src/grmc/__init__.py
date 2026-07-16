@@ -1,0 +1,3 @@
+"""Grok Reflective Memory Core (GRMC)"""
+
+__version__ = "0.1.1"
