@@ -16,6 +16,7 @@ from ..models.episode import Episode
 from ..storage.sqlite_store import SQLiteStore
 from .bridge_cmd import bridge_app
 from .edges_cmd import edges_app
+from .graph_cmd import graph_app
 from .ops_cmd import ops_app
 
 app = typer.Typer(
@@ -24,6 +25,7 @@ app = typer.Typer(
 )
 app.add_typer(bridge_app, name="bridge")
 app.add_typer(edges_app, name="edges")
+app.add_typer(graph_app, name="graph")
 app.add_typer(ops_app, name="ops")
 console = Console()
 
@@ -243,6 +245,11 @@ def reflect(
         "--no-edge-propose",
         help="Do not enqueue soft edge suggestions as pending edge proposals",
     ),
+    llm: Optional[bool] = typer.Option(
+        None,
+        "--llm/--no-llm",
+        help="LLM verification: --llm on, --no-llm off, omit=env GRMC_LLM (default off)",
+    ),
     data_dir: str = typer.Option(DEFAULT_DATA_DIR, "--data-dir"),
     embedder: str = typer.Option("auto", "--embedder"),
 ):
@@ -261,6 +268,7 @@ def reflect(
             persist=not no_persist,
             enqueue_proposals=not no_propose,
             enqueue_edge_suggestions=not no_edge_propose,
+            llm=llm,
         )
 
     title = "Reflection Report (non-mutating)"
@@ -270,13 +278,15 @@ def reflect(
     embedder_name = getattr(manager.embedder, "name", "unknown")
     enqueued = report.metadata.get("proposals_enqueued", 0)
     edge_enq = report.metadata.get("edge_proposals_enqueued", 0)
+    llm_meta = report.metadata.get("llm") or {}
+    llm_state = "on" if llm_meta.get("enabled") else "off"
     console.print(
         Panel.fit(
             f"[bold]{report.report_id}[/bold]\n"
             f"mode={report.mode}  episodes={report.episodes_analyzed}  "
             f"confidence={report.confidence_level}  mutates_memory={report.mutates_memory}\n"
-            f"embedder={embedder_name}  concept_proposals={enqueued}  "
-            f"edge_proposals={edge_enq}",
+            f"embedder={embedder_name}  llm={llm_state}  "
+            f"concept_proposals={enqueued}  edge_proposals={edge_enq}",
             title=title,
             border_style="cyan",
         )

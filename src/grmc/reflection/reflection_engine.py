@@ -111,11 +111,19 @@ def _content_overlap(a: str, b: str) -> List[str]:
 class ReflectionEngine:
     """Produce conservative reflection reports without mutating memory."""
 
-    def __init__(self, memory_manager: Any, report_dir: Optional[str] = None):
+    def __init__(
+        self,
+        memory_manager: Any,
+        report_dir: Optional[str] = None,
+        llm_enabled: Optional[bool] = None,
+        llm_verifier: Any = None,
+    ):
         self.memory_manager = memory_manager
         self.store = memory_manager.store
         self.last_reflection_time: Optional[datetime] = None
         self.last_report: Optional[ReflectionReport] = None
+        self._llm_enabled_override = llm_enabled
+        self._llm_verifier = llm_verifier
 
         if report_dir is None:
             base = getattr(self.store, "persist_dir", Path("./grmc_data"))
@@ -133,12 +141,16 @@ class ReflectionEngine:
         topic: Optional[str] = None,
         top_k_for_topic: int = 15,
         persist: bool = True,
+        llm: Optional[bool] = None,
     ) -> ReflectionReport:
         """Run a reflection pass and return a structured report.
 
         Modes:
         - topic is None  → analyze recent episodes (chronological approximation)
         - topic set      → retrieve semantically related episodes for that topic
+
+        ``llm``: None → env default (off unless GRMC_LLM=1); True/False force.
+        LLM path is report-only and never writes the graph.
         """
         if topic:
             episodes = self._episodes_for_topic(topic, top_k=top_k_for_topic)
@@ -156,7 +168,7 @@ class ReflectionEngine:
             episode_ids=[e["episode_id"] for e in episodes],
             confidence_level="conservative",
             mutates_memory=False,
-            engine_version="0.5.0",
+            engine_version="0.6.0",
         )
 
         self._attach_limitations(report, mode=mode, requested_limit=recent_limit)
@@ -185,6 +197,14 @@ class ReflectionEngine:
         # Embedding pairwise tensions (report-only; still low confidence)
         emb_flags = self._scan_embedding_tensions(episodes)
         report.potential_contradictions.extend(emb_flags)
+
+        # Optional LLM enrichment (feature flag; default off)
+        use_llm = self._resolve_llm_flag(llm)
+        if use_llm:
+            report = self._apply_llm(report, episodes)
+        else:
+            report.metadata["llm"] = {"enabled": False}
+            report.notes.append("LLM verification off (default). Heuristics only.")
 
         # Soft edge ideas when graph nodes already exist (still not written)
         report.edge_suggestions = self._suggest_edges(report, episodes)
@@ -225,7 +245,45 @@ class ReflectionEngine:
             + "."
         )
 
+        report.mutates_memory = False
         return self._finalize(report, persist=persist)
+
+    def _resolve_llm_flag(self, llm: Optional[bool]) -> bool:
+        if llm is not None:
+            return bool(llm)
+        if self._llm_enabled_override is not None:
+            return bool(self._llm_enabled_override)
+        try:
+            from ..llm.config import llm_enabled_from_env
+
+            return llm_enabled_from_env()
+        except Exception:
+            return False
+
+    def _apply_llm(
+        self, report: ReflectionReport, episodes: Sequence[Dict[str, Any]]
+    ) -> ReflectionReport:
+        try:
+            if self._llm_verifier is not None:
+                verifier = self._llm_verifier
+            else:
+                from ..llm.config import LLMConfig
+                from ..llm.verification import LLMVerifier
+
+                cfg = LLMConfig.from_env(force_enabled=True)
+                verifier = LLMVerifier(config=cfg)
+            return verifier.enrich_report(report, episodes)
+        except Exception as exc:
+            report.notes.append(
+                f"LLM path failed open; using heuristics only ({exc})."
+            )
+            report.metadata["llm"] = {
+                "enabled": True,
+                "error": str(exc),
+                "fallback": "heuristic",
+            }
+            report.mutates_memory = False
+            return report
 
     def simple_contradiction_check(self, text_a: str, text_b: str) -> bool:
         """Public, intentionally weak pairwise check (for tests & CLI demos)."""
@@ -512,33 +570,46 @@ class ReflectionEngine:
                     )
 
         # Co-mentioned concepts that both exist as nodes → soft related_to
+        # Stricter v0.6: require >=2 shared episodes and non-trivial labels.
         labels_present = {
-            c.label.lower(): c for c in report.concept_candidates if c.supporting_episode_ids
+            c.label.lower(): c
+            for c in report.concept_candidates
+            if c.supporting_episode_ids and len(c.label) >= 4
         }
         node_by_label = {n.label.lower(): n for n in nodes}
-        shared_labels = [
-            lab for lab in labels_present if lab in node_by_label
-        ]
+        shared_labels = [lab for lab in labels_present if lab in node_by_label]
         for i in range(len(shared_labels)):
             for j in range(i + 1, len(shared_labels)):
                 la, lb = shared_labels[i], shared_labels[j]
                 ca, cb = labels_present[la], labels_present[lb]
                 common = set(ca.supporting_episode_ids) & set(cb.supporting_episode_ids)
-                if not common:
+                if len(common) < 2:
                     continue
                 add_sugg(
                     node_by_label[la],
                     node_by_label[lb],
                     "related_to",
-                    conf=0.22,
+                    conf=0.18,
                     reason=(
-                        f"Concepts co-occur in episode(s) {sorted(common)[:3]}; "
-                        "soft related_to only."
+                        f"Concepts co-occur in {len(common)} episode(s) "
+                        f"{sorted(common)[:3]}; soft related_to only."
                     ),
                     ep_ids=sorted(common)[:6],
                 )
 
-        return suggestions[:20]
+        # Prefer contradicts over related_to for same pair when both present
+        by_pair: Dict[tuple[str, str], List[EdgeSuggestion]] = {}
+        for s in suggestions:
+            key = tuple(sorted([s.source_node_id or "", s.target_node_id or ""]))
+            by_pair.setdefault(key, []).append(s)
+        refined: List[EdgeSuggestion] = []
+        for pair_suggs in by_pair.values():
+            types = {s.edge_type for s in pair_suggs}
+            if "contradicts" in types and "related_to" in types:
+                refined.extend(s for s in pair_suggs if s.edge_type != "related_to")
+            else:
+                refined.extend(pair_suggs)
+        return refined[:15]
 
     def _pair_contradiction(
         self,
@@ -592,6 +663,8 @@ class ReflectionEngine:
                 "No knowledge graph is written by this engine (mutates_memory=False).",
                 "Graph writes require human `grmc approve` on pending proposals.",
                 "Edge suggestions only appear when both endpoint nodes already exist.",
+                "LLM verification is opt-in (GRMC_LLM=1 or --llm); failures fall back "
+                "to heuristics; still mutates_memory=False.",
             ]
         )
         if mode == "recent":

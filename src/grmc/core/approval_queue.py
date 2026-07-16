@@ -29,7 +29,7 @@ from ..storage.sqlite_store import SQLiteStore
 DEFAULT_APPROVE_CONFIDENCE_CAP = 0.55
 DEFAULT_EDGE_CONFIDENCE_CAP = 0.45
 # Soft edge suggestions from reflection stay even lower until human raises.
-DEFAULT_SOFT_EDGE_CONFIDENCE_CAP = 0.30
+DEFAULT_SOFT_EDGE_CONFIDENCE_CAP = 0.25
 
 
 class ApprovalQueue:

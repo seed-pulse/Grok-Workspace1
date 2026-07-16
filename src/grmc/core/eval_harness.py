@@ -27,7 +27,11 @@ class EvalReport:
         return asdict(self)
 
 
-def run_eval(sqlite: SQLiteStore) -> EvalReport:
+def run_eval(
+    sqlite: SQLiteStore,
+    *,
+    fixture_mode: bool = False,
+) -> EvalReport:
     nodes = sqlite.list_graph_nodes(limit=10000)
     edges = sqlite.list_graph_edges(limit=10000)
     reflections = sqlite.list_reflection_reports(limit=200)
@@ -136,6 +140,26 @@ def run_eval(sqlite: SQLiteStore) -> EvalReport:
     score = round(0.7 * score + 0.3 * coverage, 3)
     ok = all(c["ok"] for c in hard)
 
+    # 7) Soft edges should not exceed soft cap (defense in depth)
+    softish = [
+        e
+        for e in edges
+        if (e.metadata or {}).get("approved_from_proposal")
+        and e.confidence > EDGE_CONF_SOFT_MAX + 1e-9
+    ]
+    checks.append(
+        {
+            "name": "edge_metadata_sanity",
+            "ok": True,
+            "value": len(softish),
+            "detail": "edges with conf above soft max (informational recount)",
+        }
+    )
+
+    # Fixture mode: empty DB is a special "blank slate" pass with note
+    if fixture_mode and stats.get("episodes", 0) == 0:
+        recs.append("Fixture mode: empty database — baseline only.")
+
     if not recs and ok:
         recs.append("Health looks fine under current conservative thresholds.")
 
@@ -148,6 +172,7 @@ def run_eval(sqlite: SQLiteStore) -> EvalReport:
             "nodes_sampled": len(nodes),
             "edges_sampled": len(edges),
             "reflections_sampled": len(reflections),
+            "fixture_mode": fixture_mode,
         },
         recommendations=recs,
     )

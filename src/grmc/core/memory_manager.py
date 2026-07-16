@@ -103,15 +103,18 @@ class MemoryManager:
         persist: bool = True,
         enqueue_proposals: bool = True,
         enqueue_edge_suggestions: bool = True,
+        llm: Optional[bool] = None,
     ) -> ReflectionReport:
         """Report-only reflection; optionally enqueue concept/edge proposals.
 
         Graph is never written here. Proposals are pending suggestions only.
+        ``llm`` enables optional verification (default off via env).
         """
         report = self.reflection_engine.reflect(
             recent_limit=recent_limit,
             topic=topic,
             persist=persist,
+            llm=llm,
         )
         # Persist structured report in SQLite for history / provenance
         self.sqlite.save_reflection_report(report)
